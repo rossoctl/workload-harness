@@ -287,7 +287,7 @@ class Runner:
                 with self.otel.child_span("Agent.Call") as a2a_span:
                     # Set OpenInference span kind for agent call
                     a2a_span.set_attribute("openinference.span.kind", "AGENT")
-                    response = self.a2a_client.send_prompt(prompt)
+                    response = self.a2a_client.send_prompt(prompt, session_id=session_id)
                     agent_processing_time = time.time() - agent_start
                     # Record prompt and response on the send span
                     self.otel.record_prompt(a2a_span, prompt)
