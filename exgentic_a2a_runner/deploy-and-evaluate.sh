@@ -17,6 +17,7 @@ fi
 # Default values (env vars from .env take precedence, CLI args override both)
 BENCHMARK_NAME=""
 AGENT_NAME=""
+EXPERIMENT_NAME="default"
 MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --agent)
             AGENT_NAME="$2"
+            shift 2
+            ;;
+        --experiment)
+            EXPERIMENT_NAME="$2"
             shift 2
             ;;
         --model)
@@ -62,6 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --agent NAME               Agent name (e.g., tool_calling, generic_agent)"
             echo ""
             echo "Optional Arguments:"
+            echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
@@ -71,9 +77,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark tau2 --agent tool_calling"
+            echo "  $0 --benchmark tau2 --agent tool_calling --experiment baseline"
             echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini"
             echo "  $0 --benchmark gsm8k --agent generic_agent --model Azure/gpt-4o"
-            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel"
+            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             echo ""
             echo "This script will:"
@@ -170,7 +177,7 @@ echo ""
 echo "=========================================="
 echo "Step 3/3: Running Evaluation"
 echo "=========================================="
-EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME")
+EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
 if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
     EVALUATE_ARGS+=(--phoenix-otel)
 fi
@@ -191,6 +198,7 @@ echo "✓ All steps completed successfully!"
 echo "=========================================="
 echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent: $AGENT_NAME"
+echo "Experiment: $EXPERIMENT_NAME"
 echo "Model: $MODEL_NAME"
 echo "=========================================="
 

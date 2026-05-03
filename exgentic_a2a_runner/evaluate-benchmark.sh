@@ -10,6 +10,7 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 
 BENCHMARK_NAME=""
 AGENT_NAME=""
+EXPERIMENT_NAME="default"
 PHOENIX_OTEL_ENABLED="false"
 PHOENIX_NAMESPACE="kagenti-system"
 PHOENIX_SERVICE="phoenix"
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
             AGENT_NAME="$2"
             shift 2
             ;;
+        --experiment)
+            EXPERIMENT_NAME="$2"
+            shift 2
+            ;;
         --phoenix-otel)
             PHOENIX_OTEL_ENABLED="true"
             shift
@@ -35,21 +40,22 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 --benchmark <name> --agent <name> [--phoenix-otel] [--use-mcp-gateway]"
+            echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
             echo "Required Arguments:"
             echo "  --benchmark NAME           Benchmark name (e.g., gsm8k, tau2)"
             echo "  --agent NAME               Agent name (e.g., tool_calling, generic_agent)"
             echo ""
             echo "Options:"
+            echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
             echo "  --phoenix-otel             Port-forward Phoenix OTLP and export runner telemetry to it"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark tau2 --agent tool_calling"
-            echo "  $0 --benchmark gsm8k --agent generic_agent"
-            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel"
+            echo "  $0 --benchmark gsm8k --agent generic_agent --experiment baseline"
+            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             exit 0
             ;;
@@ -349,9 +355,10 @@ if [ "$USE_MCP_GATEWAY" = "true" ]; then
     export EXGENTIC_MCP_TOOL_PREFIX="${EXGENTIC_MCP_TOOL_PREFIX:-exgentic_${BENCHMARK_NAME}_}"
 fi
 
-# Export benchmark and agent names for telemetry
+# Export benchmark, agent, and experiment names for telemetry
 export BENCHMARK_NAME="$BENCHMARK_NAME"
 export AGENT_NAME="$AGENT_NAME"
+export EXPERIMENT_NAME="$EXPERIMENT_NAME"
 
 # Export Prometheus config for infra metrics collection
 export PROMETHEUS_URL="http://localhost:${PROMETHEUS_LOCAL_PORT}"

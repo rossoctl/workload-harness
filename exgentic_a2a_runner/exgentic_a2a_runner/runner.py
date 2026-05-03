@@ -238,6 +238,7 @@ class Runner:
             agent_name=self.config.exgentic.agent_name,
             task_id=task_id,
             num_parallel_tasks=self.config.exgentic.max_parallel_sessions,
+            experiment_name=self.config.exgentic.experiment_name,
         ) as span:
             try:
                 # Create session on-demand (inside the CHAIN span)

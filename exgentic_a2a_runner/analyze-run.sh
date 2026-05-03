@@ -18,6 +18,8 @@ PHOENIX_SERVICE="phoenix"
 PHOENIX_HTTP_LOCAL_PORT="6006"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 PROJECT_NAME="default"
+EXPERIMENT_FILTER=""
+COMPARE_EXPERIMENTS=""
 
 usage() {
     cat << EOF
@@ -27,24 +29,30 @@ Options:
     -u, --url URL              Phoenix GraphQL endpoint URL (default: http://localhost:6006/graphql)
     -l, --limit NUM            Limit number of traces to download (default: 100)
     -p, --project NAME         Phoenix project name (default: default)
+    -e, --experiment NAME      Filter traces by experiment name
+    -c, --compare EXP1,EXP2    Compare two experiments (comma-separated)
     -f, --forward              Auto port-forward Phoenix from kind cluster if not accessible
     -h, --help                 Show this help message
 
-Example:
+Examples:
     $0 -u http://localhost:6006/graphql -l 200
     $0 -f -l 50
+    $0 --experiment baseline
+    $0 --compare baseline,test1
 EOF
     exit 1
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -u|--url)     PHOENIX_URL="$2"; shift 2 ;;
-        -l|--limit)   LIMIT="$2"; shift 2 ;;
-        -p|--project) PROJECT_NAME="$2"; shift 2 ;;
-        -f|--forward) AUTO_PORT_FORWARD="true"; shift ;;
-        -h|--help)    usage ;;
-        *)            echo "Unknown option: $1"; usage ;;
+        -u|--url)        PHOENIX_URL="$2"; shift 2 ;;
+        -l|--limit)      LIMIT="$2"; shift 2 ;;
+        -p|--project)    PROJECT_NAME="$2"; shift 2 ;;
+        -e|--experiment) EXPERIMENT_FILTER="$2"; shift 2 ;;
+        -c|--compare)    COMPARE_EXPERIMENTS="$2"; shift 2 ;;
+        -f|--forward)    AUTO_PORT_FORWARD="true"; shift ;;
+        -h|--help)       usage ;;
+        *)               echo "Unknown option: $1"; usage ;;
     esac
 done
 
@@ -52,6 +60,12 @@ echo "=== Phoenix Trace Analysis ==="
 echo "Phoenix URL: $PHOENIX_URL"
 echo "Project: $PROJECT_NAME"
 echo "Limit: $LIMIT"
+if [ -n "$EXPERIMENT_FILTER" ]; then
+    echo "Experiment Filter: $EXPERIMENT_FILTER"
+fi
+if [ -n "$COMPARE_EXPERIMENTS" ]; then
+    echo "Comparing Experiments: $COMPARE_EXPERIMENTS"
+fi
 echo ""
 
 # --- Helper functions ---
@@ -158,7 +172,25 @@ echo ""
 
 echo "Fetching Agent.Session traces..."
 
-ROOTS_QUERY="{ node(id: \\\"$PROJECT_ID\\\") { ... on Project { spans(first: $LIMIT, rootSpansOnly: true, sort: {col: startTime, dir: desc}, filterCondition: \\\"name == 'Agent.Session'\\\") { edges { node { context { traceId } } } } } } }"
+# Build filter condition
+FILTER_CONDITION="name == 'Agent.Session'"
+if [ -n "$EXPERIMENT_FILTER" ]; then
+    FILTER_CONDITION="$FILTER_CONDITION and metadata.experiment_name == '$EXPERIMENT_FILTER'"
+fi
+if [ -n "$COMPARE_EXPERIMENTS" ]; then
+    IFS=',' read -ra EXPERIMENTS <<< "$COMPARE_EXPERIMENTS"
+    EXP_CONDITIONS=""
+    for exp in "${EXPERIMENTS[@]}"; do
+        if [ -z "$EXP_CONDITIONS" ]; then
+            EXP_CONDITIONS="metadata.experiment_name == '$exp'"
+        else
+            EXP_CONDITIONS="$EXP_CONDITIONS or metadata.experiment_name == '$exp'"
+        fi
+    done
+    FILTER_CONDITION="$FILTER_CONDITION and ($EXP_CONDITIONS)"
+fi
+
+ROOTS_QUERY="{ node(id: \\\"$PROJECT_ID\\\") { ... on Project { spans(first: $LIMIT, rootSpansOnly: true, sort: {col: startTime, dir: desc}, filterCondition: \\\"$FILTER_CONDITION\\\") { edges { node { context { traceId } } } } } } }"
 
 set +e
 ROOTS_RESPONSE=$(run_graphql "$ROOTS_QUERY")
@@ -218,4 +250,9 @@ echo ""
 
 # --- Step 5: Pipe to Python for analysis ---
 
-echo "$TRACES_JSON" | jq -c '{traces: .}' | python3 "$SCRIPT_DIR/analyze_traces.py"
+PYTHON_ARGS=""
+if [ -n "$COMPARE_EXPERIMENTS" ]; then
+    PYTHON_ARGS="--compare"
+fi
+
+echo "$TRACES_JSON" | jq -c '{traces: .}' | python3 "$SCRIPT_DIR/analyze_traces.py" $PYTHON_ARGS
