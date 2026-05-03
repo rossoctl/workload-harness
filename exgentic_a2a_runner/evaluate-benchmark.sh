@@ -346,7 +346,7 @@ export A2A_BASE_URL="http://localhost:7701"
 
 # Set tool prefix when using MCP gateway (gateway namespaces tools with a prefix)
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
-    export EXGENTIC_MCP_TOOL_PREFIX="${EXGENTIC_MCP_TOOL_PREFIX:-exgentic_}"
+    export EXGENTIC_MCP_TOOL_PREFIX="${EXGENTIC_MCP_TOOL_PREFIX:-exgentic_${BENCHMARK_NAME}_}"
 fi
 
 # Export benchmark and agent names for telemetry

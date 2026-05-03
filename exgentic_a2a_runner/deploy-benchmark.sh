@@ -724,7 +724,7 @@ metadata:
   name: ${TOOL_NAME}-servers
   namespace: ${NAMESPACE}
 spec:
-  toolPrefix: exgentic_
+  toolPrefix: exgentic_${BENCHMARK_NAME}_
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute
