@@ -71,6 +71,8 @@ class A2AProxyClient:
 
     async def _async_send_prompt(self, prompt: str, timeout_s: float, otel_context=None) -> str:
         """Async implementation using the standard a2a-sdk."""
+        import uuid
+
         import httpx
         from a2a.client import ClientConfig, ClientFactory, create_text_message_object
         from a2a.client.card_resolver import A2ACardResolver
@@ -88,7 +90,13 @@ class A2AProxyClient:
         else:
             token = None
 
-        httpx_client = httpx.AsyncClient(timeout=timeout_s)
+        # x-session-id lets the IBAC sidecar (if present) key intent per prompt.
+        # Harmless when IBAC isn't deployed; the agent ignores unknown headers.
+        session_id = uuid.uuid4().hex
+        httpx_client = httpx.AsyncClient(
+            timeout=timeout_s,
+            headers={"x-session-id": session_id},
+        )
         if self.otel_enabled:
             try:
                 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor

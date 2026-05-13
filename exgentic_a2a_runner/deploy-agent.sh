@@ -13,6 +13,8 @@ KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
+# IBAC_ENABLED lets .env pre-set the default; --ibac / --no-ibac always override.
+USE_IBAC="${IBAC_ENABLED:-false}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -41,6 +43,14 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --ibac)
+            USE_IBAC="true"
+            shift
+            ;;
+        --no-ibac)
+            USE_IBAC="false"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -53,7 +63,16 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
+            echo "  --ibac                     Inject the IBAC sidecar + Envoy overlay into the agent pod"
+            echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
+            echo ""
+            echo "IBAC Environment Variables (used with --ibac):"
+            echo "  IBAC_ENABLED                 Default for --ibac flag if set to true"
+            echo "  IBAC_SIDECAR_IMAGE           Sidecar image (default: localhost/ibac-sidecar:latest)"
+            echo "  IBAC_ENVOY_IMAGE             Envoy image (default: envoyproxy/envoy:v1.28-latest)"
+            echo "  IBAC_OLLAMA_URL              Validator LLM (default: http://host.docker.internal:11434)"
+            echo "  IBAC_TRUSTED_DESTINATIONS    Comma-separated host[:port] bypass list (auto-derived if unset)"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark gsm8k --agent generic_agent"
@@ -647,6 +666,24 @@ kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
 echo "✓ Deployment stable"
 echo ""
 
+# Step 11.4: Optionally inject IBAC sidecar overlay
+if [ "$USE_IBAC" = "true" ]; then
+    echo "Step 11.4: Applying IBAC overlay..."
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ ! -x "$SCRIPT_DIR/ibac/apply-ibac.sh" ]; then
+        echo "Error: $SCRIPT_DIR/ibac/apply-ibac.sh not found or not executable"
+        exit 1
+    fi
+    AGENT_NAME="$AGENT_NAME" NAMESPACE="$NAMESPACE" TOOL_NAME="$TOOL_NAME" \
+        OPENAI_API_BASE="${OPENAI_API_BASE:-}" \
+        IBAC_SIDECAR_IMAGE="${IBAC_SIDECAR_IMAGE:-}" \
+        IBAC_ENVOY_IMAGE="${IBAC_ENVOY_IMAGE:-}" \
+        IBAC_OLLAMA_URL="${IBAC_OLLAMA_URL:-}" \
+        IBAC_TRUSTED_DESTINATIONS="${IBAC_TRUSTED_DESTINATIONS:-}" \
+        "$SCRIPT_DIR/ibac/apply-ibac.sh"
+    echo ""
+fi
+
 # Step 12: Test agent card access
 echo "Step 12: Testing agent card access..."
 
@@ -720,6 +757,7 @@ echo "  Tool: $TOOL_NAME.$NAMESPACE:8000"
 echo "  Model: $MODEL_NAME"
 echo "  CPU Limit: 4 cores"
 echo "  Memory Limit: 3Gi"
+echo "  IBAC: $USE_IBAC"
 if [ -n "$OPENAI_API_BASE" ]; then
     echo "  LLM_API_BASE: $OPENAI_API_BASE"
     echo "  OPENAI_API_BASE: $OPENAI_API_BASE"

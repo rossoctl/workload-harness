@@ -22,6 +22,7 @@ KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
 PHOENIX_OTEL_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
+USE_IBAC="${IBAC_ENABLED:-false}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -54,6 +55,14 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --ibac)
+            USE_IBAC="true"
+            shift
+            ;;
+        --no-ibac)
+            USE_IBAC="false"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -67,6 +76,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
             echo "  --phoenix-otel             Port-forward Phoenix OTLP during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
+            echo "  --ibac                     Inject the IBAC sidecar into the agent pod"
+            echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
@@ -83,6 +94,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Environment Variables:"
             echo "  USE_MCP_GATEWAY=true       Same as --use-mcp-gateway (set in .env)"
+            echo "  IBAC_ENABLED=true          Same as --ibac (set in .env)"
             exit 0
             ;;
         -*)
@@ -120,12 +132,19 @@ echo "Model: $MODEL_NAME"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
 echo "Phoenix OTEL: $PHOENIX_OTEL_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
+echo "IBAC: $USE_IBAC"
 echo ""
 
 # Build gateway flag for sub-scripts
 MCP_GATEWAY_FLAG=""
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_GATEWAY_FLAG="--use-mcp-gateway"
+fi
+
+# Build IBAC flag for deploy-agent.sh (explicit --ibac/--no-ibac so CLI always wins over agent script's own IBAC_ENABLED read)
+IBAC_FLAG="--no-ibac"
+if [ "$USE_IBAC" = "true" ]; then
+    IBAC_FLAG="--ibac"
 fi
 
 # Step 1: Deploy benchmark
@@ -155,7 +174,8 @@ echo "=========================================="
     --model "$MODEL_NAME" \
     --keycloak-user "$KEYCLOAK_USERNAME" \
     --keycloak-pass "$KEYCLOAK_PASSWORD" \
-    $MCP_GATEWAY_FLAG
+    $MCP_GATEWAY_FLAG \
+    $IBAC_FLAG
 
 if [ $? -ne 0 ]; then
     echo "Error: Agent deployment failed"
