@@ -66,6 +66,20 @@ fi
 # Use kubectl -n to force namespace regardless of what's in the file.
 sed -E "s#(^  namespace:).*#\1 ${NAMESPACE}#" "$ENVOY_CFG" | kubectl apply -f -
 
+# Optional: if intent_prompt.txt is present locally, mount it into the sidecar
+# via a ConfigMap. Otherwise the sidecar uses its baked-in default.
+INTENT_PROMPT_FILE="$IBAC_DIR/intent_prompt.txt"
+if [ -f "$INTENT_PROMPT_FILE" ]; then
+    echo "  Intent prompt:         $INTENT_PROMPT_FILE (mounted via ConfigMap)"
+    kubectl -n "$NAMESPACE" create configmap ibac-intent-prompt \
+        --from-file=intent_prompt.txt="$INTENT_PROMPT_FILE" \
+        --dry-run=client -o yaml | kubectl apply -f -
+else
+    echo "  Intent prompt:         (using baked-in default; no $INTENT_PROMPT_FILE)"
+    # Best-effort cleanup so a stale ConfigMap from a previous run doesn't override the default.
+    kubectl -n "$NAMESPACE" delete configmap ibac-intent-prompt --ignore-not-found >/dev/null 2>&1 || true
+fi
+
 # Render the deployment patch with env-specific values, then apply.
 PATCH_TMPL="$IBAC_DIR/patch-deployment.yaml"
 if [ ! -f "$PATCH_TMPL" ]; then

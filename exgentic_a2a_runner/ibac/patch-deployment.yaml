@@ -73,9 +73,23 @@ spec:
         - name: TRUSTED_DESTINATIONS
           # Bypass validation for infra/LLM calls; only external tool calls get validated.
           value: "ete-litellm.ai-models.vpc-int.res.ibm.com,ete-litellm.ai-models.vpc-int.res.ibm.com:443,exgentic-mcp-gsm8k-mcp:8000,exgentic-mcp-gsm8k-mcp.team1.svc.cluster.local:8000,keycloak.keycloak.svc.cluster.local:8080,otel-collector.kagenti-system.svc.cluster.local:8335,host.docker.internal:11434"
+        # If the ibac-intent-prompt ConfigMap exists, the sidecar reads the
+        # prompt from this path. Otherwise it falls back to the baked-in copy.
+        - name: INTENT_PROMPT_PATH
+          value: /etc/ibac/intent_prompt.txt
+        volumeMounts:
+        - name: ibac-intent-prompt
+          mountPath: /etc/ibac
+          readOnly: true
         securityContext:
           runAsUser: 1337
       volumes:
       - name: ibac-envoy-config
         configMap:
           name: ibac-envoy-config
+      # optional=true: pod still starts if the ConfigMap is missing, and the
+      # sidecar will fall back to the baked-in default prompt.
+      - name: ibac-intent-prompt
+        configMap:
+          name: ibac-intent-prompt
+          optional: true
