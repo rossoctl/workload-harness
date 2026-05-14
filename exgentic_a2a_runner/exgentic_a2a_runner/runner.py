@@ -225,12 +225,13 @@ class Runner:
         start_time = time.time()
         session_id: str = f"pending-{task_id}"  # Initialize with temporary ID
         creation_time: float = 0.0  # Initialize creation time
+        prompt: str = ""  # Initialize prompt
+        response: str = ""  # Initialize response
 
         logger.info(f"Processing task: {task_id}")
 
-        # Start OTEL span (session creation will be inside)
         with self.otel.session_span(
-            session_id=f"pending-{task_id}",  # Temporary ID until session is created
+            session_id=f"pending-{task_id}",
             mcp_server_url=self.config.exgentic.mcp_server_url,
             a2a_base_url=self.config.a2a.base_url,
             a2a_timeout=self.config.a2a.timeout_seconds,
@@ -241,14 +242,13 @@ class Runner:
             experiment_name=self.config.exgentic.experiment_name,
         ) as span:
             try:
-                # Create session on-demand (inside the CHAIN span)
+                # Create session on-demand
                 creation_start = time.time()
                 with self.otel.child_span("MCP.CreateSession") as create_span:
                     try:
                         session_data = self.exgentic.create_session(task_id=task_id)
                         session_id = session_data.session_id
                         creation_time = time.time() - creation_start
-                        # Update the session_id attribute on the parent span
                         span.set_attribute("metadata.session_id", session_id)
                         create_span.set_attribute("metadata.session_id", session_id)
                         logger.info(f"Created session {session_id} for task {task_id} in {creation_time:.2f}s")
@@ -258,7 +258,6 @@ class Runner:
                         logger.error(error_msg)
                         create_span.set_attribute("error", True)
                         create_span.set_attribute("error.message", error_msg)
-                        # Record failure and return early
                         self.otel.record_failure(span, e, "session_creation_failed")
                         return SessionResult(
                             session_id=f"failed-{task_id}",
@@ -274,10 +273,8 @@ class Runner:
                 # Build prompt with session_id and context
                 with self.otel.child_span("Prompt.Build") as prompt_span:
                     prompt = build_prompt(session_data.task, session_data.session_id, session_data.context)
-                    # Record prompt on the build span
                     self.otel.record_prompt(prompt_span, prompt)
                 
-                # Also record on parent span for backward compatibility
                 self.otel.record_prompt(span, prompt)
 
                 if self.config.debug.log_prompt:
@@ -286,16 +283,13 @@ class Runner:
                 # Send A2A request (agent processing time)
                 agent_start = time.time()
                 with self.otel.child_span("Agent.Call") as a2a_span:
-                    # Set OpenInference span kind for agent call
                     a2a_span.set_attribute("openinference.span.kind", "AGENT")
                     response = self.a2a_client.send_prompt(prompt, session_id=session_id)
                     agent_processing_time = time.time() - agent_start
-                    # Record prompt and response on the send span
                     self.otel.record_prompt(a2a_span, prompt)
                     self.otel.record_response(a2a_span, response)
                     self.otel.record_a2a_request(a2a_span, agent_processing_time)
 
-                # Also record on parent span for backward compatibility
                 self.otel.record_a2a_request(span, agent_processing_time)
                 self.otel.record_response(span, response)
 
@@ -305,11 +299,9 @@ class Runner:
                 # Evaluate session
                 eval_start = time.time()
                 with self.otel.child_span("Evaluator.Evaluate") as eval_span:
-                    # Set OpenInference span kind for evaluator
                     eval_span.set_attribute("openinference.span.kind", "EVALUATOR")
                     evaluation_result = self.exgentic.evaluate_session(session_id)
                     evaluation_time = time.time() - eval_start
-                    # Record evaluation result using Phoenix evaluation conventions
                     eval_span.set_attribute("eval.name", "exgentic_benchmark_evaluation")
                     eval_span.set_attribute("eval.result", "pass" if evaluation_result else "fail")
                     eval_span.set_attribute("eval.score", 1.0 if evaluation_result else 0.0)
@@ -317,10 +309,10 @@ class Runner:
                     if self.otel.evaluation_latency_histogram:
                         self.otel.evaluation_latency_histogram.record(evaluation_time)
                 
-                # Also record on parent span for backward compatibility
                 self.otel.record_evaluation(span, evaluation_time)
 
                 # Collect infrastructure metrics from Prometheus
+                infra_metrics = None
                 if self.prometheus:
                     try:
                         with self.otel.child_span("Infra.Metrics"):
@@ -346,6 +338,8 @@ class Runner:
                 # Record success
                 self.otel.record_success(span, evaluation_result)
 
+                # Record success in MLflow
+                infra_metrics_dict = None
                 total_time = time.time() - start_time
                 logger.info(
                     f"Session {session_id} completed in {total_time:.2f}s "
@@ -356,7 +350,7 @@ class Runner:
                 return SessionResult(
                     session_id=session_id,
                     success=True,
-                    latency_seconds=agent_processing_time,  # Latency is now only agent processing time
+                    latency_seconds=agent_processing_time,
                     evaluation_result=evaluation_result,
                     creation_time_seconds=creation_time,
                     agent_processing_seconds=agent_processing_time,
@@ -385,7 +379,7 @@ class Runner:
                 return SessionResult(
                     session_id=session_id,
                     success=False,
-                    latency_seconds=0.0,  # No agent processing time on failure
+                    latency_seconds=0.0,
                     evaluation_result=False,
                     creation_time_seconds=creation_time,
                     agent_processing_seconds=0.0,
@@ -478,7 +472,7 @@ class Runner:
                 self.exgentic.shutdown()
             except Exception as e:
                 logger.warning(f"Error shutting down Exgentic adapter: {e}")
-            
+
             self.otel.shutdown()
 
 

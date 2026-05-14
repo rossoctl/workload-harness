@@ -1,6 +1,6 @@
 #!/bin/bash
 # Evaluate a specific Exgentic benchmark
-# Usage: ./evaluate-benchmark.sh --benchmark <name> --agent <name> [--phoenix-otel] [--use-mcp-gateway]
+# Usage: ./evaluate-benchmark.sh --benchmark <name> --agent <name> [--mlflow] [--use-mcp-gateway]
 # Example: ./evaluate-benchmark.sh --benchmark tau2 --agent tool_calling
 # Example: ./evaluate-benchmark.sh --benchmark tau2 --agent tool_calling --use-mcp-gateway
 
@@ -11,10 +11,10 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 BENCHMARK_NAME=""
 AGENT_NAME=""
 EXPERIMENT_NAME="default"
-PHOENIX_OTEL_ENABLED="false"
-PHOENIX_NAMESPACE="kagenti-system"
-PHOENIX_SERVICE="phoenix"
-PHOENIX_OTLP_LOCAL_PORT="4317"
+MLFLOW_ENABLED="false"
+OTEL_COLLECTOR_NAMESPACE="kagenti-system"
+OTEL_COLLECTOR_SERVICE="otel-collector"
+OTEL_COLLECTOR_LOCAL_PORT="4327"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -31,8 +31,8 @@ while [[ $# -gt 0 ]]; do
             EXPERIMENT_NAME="$2"
             shift 2
             ;;
-        --phoenix-otel)
-            PHOENIX_OTEL_ENABLED="true"
+        --mlflow)
+            MLFLOW_ENABLED="true"
             shift
             ;;
         --use-mcp-gateway)
@@ -48,14 +48,14 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
-            echo "  --phoenix-otel             Port-forward Phoenix OTLP and export runner telemetry to it"
+            echo "  --mlflow                   Enable MLflow tracing via OTEL collector (default: disabled)"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark tau2 --agent tool_calling"
             echo "  $0 --benchmark gsm8k --agent generic_agent --experiment baseline"
-            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel --experiment test1"
+            echo "  $0 --benchmark gsm8k --agent tool_calling --mlflow --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             exit 0
             ;;
@@ -74,7 +74,7 @@ done
 
 if [ -z "$BENCHMARK_NAME" ] || [ -z "$AGENT_NAME" ]; then
     echo "Error: Both --benchmark and --agent are required"
-    echo "Usage: $0 --benchmark <name> --agent <name> [--phoenix-otel] [--use-mcp-gateway]"
+    echo "Usage: $0 --benchmark <name> --agent <name> [--mlflow] [--use-mcp-gateway]"
     echo "Use --help for more information"
     exit 1
 fi
@@ -113,7 +113,7 @@ if [ "$USE_MCP_GATEWAY" = "true" ]; then
 else
     echo "Benchmark Service: $BENCHMARK_SERVICE"
 fi
-echo "Phoenix OTEL: ${PHOENIX_OTEL_ENABLED}"
+echo "MLflow tracing: ${MLFLOW_ENABLED}"
 echo ""
 
 # Check if kubectl is available
@@ -152,15 +152,15 @@ else
     echo "  - MCP Server: localhost:7770 -> $BENCHMARK_SERVICE.team1:8000"
 fi
 echo "  - A2A Agent:  localhost:7701 -> $AGENT_SERVICE.team1:8080"
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    echo "  - Phoenix OTLP: localhost:${PHOENIX_OTLP_LOCAL_PORT} -> ${PHOENIX_SERVICE}.${PHOENIX_NAMESPACE}:4317"
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "  - OTEL Collector: localhost:${OTEL_COLLECTOR_LOCAL_PORT} -> ${OTEL_COLLECTOR_SERVICE}.${OTEL_COLLECTOR_NAMESPACE}:4317"
 fi
 echo ""
 
 # Kill any existing port-forwards on these ports
 PORTS_TO_CLEANUP="7770 7701"
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    PORTS_TO_CLEANUP="$PORTS_TO_CLEANUP ${PHOENIX_OTLP_LOCAL_PORT}"
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    PORTS_TO_CLEANUP="$PORTS_TO_CLEANUP ${OTEL_COLLECTOR_LOCAL_PORT}"
 fi
 
 echo "Cleaning up existing port-forwards on ports:${PORTS_TO_CLEANUP}"
@@ -205,14 +205,14 @@ fi
 echo "✓ All pods are ready"
 echo ""
 
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    echo "  Checking Phoenix pod..."
-    "$KUBECTL_BIN" wait --for=condition=ready pod -l app=phoenix -n $PHOENIX_NAMESPACE --timeout=60s
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "  Checking OTEL collector pod..."
+    "$KUBECTL_BIN" wait --for=condition=ready pod -l app=otel-collector -n $OTEL_COLLECTOR_NAMESPACE --timeout=60s
     if [ $? -ne 0 ]; then
-        echo "Error: Phoenix pod is not ready"
+        echo "Error: OTEL collector pod is not ready"
         exit 1
     fi
-    echo "✓ Phoenix pod is ready"
+    echo "✓ OTEL collector pod is ready"
     echo ""
 fi
 
@@ -234,10 +234,10 @@ echo "Starting port-forward for A2A agent..."
 "$KUBECTL_BIN" port-forward -n team1 svc/$AGENT_SERVICE 7701:8080 >/dev/null 2>&1 &
 PF_AGENT_PID=$!
 
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    echo "Starting port-forward for Phoenix OTLP..."
-    "$KUBECTL_BIN" port-forward -n $PHOENIX_NAMESPACE svc/$PHOENIX_SERVICE ${PHOENIX_OTLP_LOCAL_PORT}:4317 >/dev/null 2>&1 &
-    PF_PHOENIX_PID=$!
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "Starting port-forward for OTEL collector (traces -> MLflow)..."
+    "$KUBECTL_BIN" port-forward -n $OTEL_COLLECTOR_NAMESPACE svc/$OTEL_COLLECTOR_SERVICE ${OTEL_COLLECTOR_LOCAL_PORT}:4317 >/dev/null 2>&1 &
+    PF_OTEL_COLLECTOR_PID=$!
 fi
 
 # Prometheus port-forward for infra metrics
@@ -265,8 +265,8 @@ if ! ps -p $PF_AGENT_PID > /dev/null; then
     exit 1
 fi
 
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ] && ! ps -p $PF_PHOENIX_PID > /dev/null; then
-    echo "Error: Phoenix OTLP port-forward failed to start"
+if [ "$MLFLOW_ENABLED" = "true" ] && ! ps -p $PF_OTEL_COLLECTOR_PID > /dev/null; then
+    echo "Error: OTEL collector port-forward failed to start"
     kill $PF_MCP_PID 2>/dev/null || true
     kill $PF_AGENT_PID 2>/dev/null || true
     exit 1
@@ -276,8 +276,8 @@ echo ""
 echo "✓ Port forwarding established"
 echo "  MCP Server PID: $PF_MCP_PID"
 echo "  A2A Agent PID:  $PF_AGENT_PID"
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    echo "  Phoenix PID:    $PF_PHOENIX_PID"
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "  OTEL Collector PID: $PF_OTEL_COLLECTOR_PID"
 fi
 echo ""
 
@@ -287,8 +287,8 @@ cleanup() {
     echo "Cleaning up port forwards..."
     kill $PF_MCP_PID 2>/dev/null || true
     kill $PF_AGENT_PID 2>/dev/null || true
-    if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-        kill $PF_PHOENIX_PID 2>/dev/null || true
+    if [ "$MLFLOW_ENABLED" = "true" ]; then
+        kill $PF_OTEL_COLLECTOR_PID 2>/dev/null || true
     fi
     kill $PF_PROMETHEUS_PID 2>/dev/null || true
     echo "Done."
@@ -312,9 +312,9 @@ else
     echo "⚠ May not be reachable - this might be OK"
 fi
 
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    echo -n "  Phoenix OTLP: "
-    if nc -z localhost ${PHOENIX_OTLP_LOCAL_PORT} 2>/dev/null; then
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo -n "  OTEL Collector: "
+    if nc -z localhost ${OTEL_COLLECTOR_LOCAL_PORT} 2>/dev/null; then
         echo "✓ Reachable"
     else
         echo "⚠ Port check failed"
@@ -366,11 +366,14 @@ export INFRA_MCP_POD_PREFIX="$BENCHMARK_DEPLOYMENT"
 export INFRA_A2A_POD_PREFIX="$AGENT_DEPLOYMENT"
 export INFRA_NAMESPACE="team1"
 
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:${PHOENIX_OTLP_LOCAL_PORT}"
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    # Send OTEL traces to the collector, which forwards to MLflow's /v1/traces
+    # with the required x-mlflow-experiment-id header and OAuth2 auth.
+    # Traces land in MLflow experiment 0 (Default).
+    export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:${OTEL_COLLECTOR_LOCAL_PORT}"
     export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
     export OTEL_EXPORTER_OTLP_INSECURE="true"
-    echo "Phoenix OTEL export enabled: ${OTEL_EXPORTER_OTLP_ENDPOINT}"
+    echo "MLflow tracing enabled via OTEL collector (localhost:${OTEL_COLLECTOR_LOCAL_PORT} -> MLflow experiment 0)"
 fi
 
 # Run the harness with optional log level

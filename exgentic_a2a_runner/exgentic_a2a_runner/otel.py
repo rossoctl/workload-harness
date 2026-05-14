@@ -244,13 +244,13 @@ class OTELInstrumentation:
         ) as span:
             # Set span kind to CHAIN for OpenInference
             span.set_attribute("openinference.span.kind", "CHAIN")
-            
+
             # Set span attributes
             span.set_attribute("metadata.session_id", session_id)
             span.set_attribute("metadata.mcp_server_url", mcp_server_url)
             span.set_attribute("metadata.a2a_url", a2a_base_url)
             span.set_attribute("metadata.timeout_seconds", a2a_timeout)
-            
+
             # Set metadata attributes (using metadata. prefix for Arize Phoenix)
             span.set_attribute("metadata.benchmark_name", benchmark_name)
             span.set_attribute("metadata.agent_name", agent_name)

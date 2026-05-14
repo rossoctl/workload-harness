@@ -295,18 +295,25 @@ echo ""
 # Step 6: Set up port-forward to Kagenti backend
 echo "Step 6: Setting up port-forward to Kagenti backend..."
 
-# Check if port-forward is already running
-if nc -z localhost $KAGENTI_PORT 2>/dev/null; then
-    echo "✓ Port $KAGENTI_PORT is already in use (assuming Kagenti backend is accessible)"
+# Check if Kagenti API is actually responding (not just port open)
+if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
 else
+    # Kill any stale port-forward that has the port open but isn't working
+    if nc -z localhost $KAGENTI_PORT 2>/dev/null; then
+        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
+        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+
     echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
     kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
     PORT_FORWARD_PID=$!
-    
+
     # Wait for port-forward to be ready
     echo "Waiting for port-forward to be ready..."
     for i in {1..10}; do
-        if curl -s $KAGENTI_API/api/v1/namespaces >/dev/null 2>&1; then
+        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
             echo "✓ Port-forward is ready"
             break
         fi
@@ -323,10 +330,15 @@ echo ""
 
 # Step 7: Delete existing tool via Kagenti API if it exists
 echo "Step 7: Deleting existing tool via Kagenti API if it exists..."
-DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_delete_response.txt -X DELETE "$KAGENTI_API/api/v1/tools/$NAMESPACE/$TOOL_NAME" \
-    -H "Authorization: Bearer $ACCESS_TOKEN")
+DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete_response.txt -X DELETE "$KAGENTI_API/api/v1/tools/$NAMESPACE/$TOOL_NAME" \
+    -H "Authorization: Bearer $ACCESS_TOKEN") || true
 
-if [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
+if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Tool deleted or did not exist (HTTP $DELETE_RESPONSE)"
 else
     echo "Warning: Delete returned HTTP $DELETE_RESPONSE"
@@ -500,10 +512,10 @@ echo "$TOOL_JSON"
 echo ""
 
 # Deploy tool using official Kagenti API with authentication
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_response.txt -X POST "$KAGENTI_API/api/v1/tools" \
+HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_response.txt -X POST "$KAGENTI_API/api/v1/tools" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -d "$TOOL_JSON")
+    -d "$TOOL_JSON") || true
 
 RESPONSE=$(cat /tmp/kagenti_response.txt)
 
@@ -512,7 +524,12 @@ echo "$RESPONSE"
 echo ""
 
 # Check if deployment was successful
-if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Tool deployment successful"
 elif [ "$HTTP_CODE" = "409" ]; then
     echo "✓ Tool already exists (HTTP 409)"
@@ -589,10 +606,10 @@ echo ""
 # Step 12.1: Set resource limits
 echo "Step 12.1: Setting resource limits..."
 
-# Set CPU limit to 4 cores and memory limit to 3GB
+# Set CPU limit to 4 cores and memory limit to 4GB
 kubectl set resources deployment/$TOOL_NAME -n $NAMESPACE \
-    --limits=cpu=4,memory=3Gi \
-    --requests=cpu=500m,memory=512Mi 2>/dev/null && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 3Gi)" || echo "Warning: Could not set resource limits"
+    --limits=cpu=4,memory=4Gi \
+    --requests=cpu=500m,memory=512Mi 2>/dev/null && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 4Gi)" || echo "Warning: Could not set resource limits"
 
 echo ""
 

@@ -338,23 +338,48 @@ echo ""
 
 # Step 4: Set up port-forward to Kagenti backend
 echo "Step 4: Setting up port-forward to Kagenti backend..."
-if lsof -Pi :$KAGENTI_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "✓ Port $KAGENTI_PORT is already in use (assuming Kagenti backend is accessible)"
+if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
 else
+    # Kill any stale port-forward that has the port open but isn't working
+    if lsof -Pi :$KAGENTI_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
+        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+
     echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
     kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
     PORT_FORWARD_PID=$!
-    sleep 2
+
+    echo "Waiting for port-forward to be ready..."
+    for i in {1..10}; do
+        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+            echo "✓ Port-forward is ready"
+            break
+        fi
+        if [ $i -eq 10 ]; then
+            echo "Error: Port-forward failed to become ready"
+            kill $PORT_FORWARD_PID 2>/dev/null || true
+            exit 1
+        fi
+        sleep 1
+    done
 fi
 
 echo ""
 
 # Step 5: Delete existing agent if it exists
 echo "Step 5: Deleting existing agent via Kagenti API if it exists..."
-DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_delete_agent_response.txt -X DELETE "$KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
-    -H "Authorization: Bearer $ACCESS_TOKEN")
+DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete_agent_response.txt -X DELETE "$KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
+    -H "Authorization: Bearer $ACCESS_TOKEN") || true
 
-if [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
+if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Agent deleted or did not exist (HTTP $DELETE_RESPONSE)"
 else
     echo "Warning: Delete returned HTTP $DELETE_RESPONSE"
@@ -384,10 +409,10 @@ if [ -z "$ENV_CONTENT" ] || echo "$ENV_CONTENT" | grep -q "404: Not Found"; then
 fi
 
 # Parse env vars using the Kagenti API
-ENV_PARSE_RESPONSE=$(curl -s -X POST "$KAGENTI_API/api/v1/agents/parse-env" \
+ENV_PARSE_RESPONSE=$(curl -s --max-time 10 -X POST "$KAGENTI_API/api/v1/agents/parse-env" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -d "{\"content\": $(echo "$ENV_CONTENT" | jq -Rs .)}")
+    -d "{\"content\": $(echo "$ENV_CONTENT" | jq -Rs .)}") || true
 
 ENV_VARS=$(echo "$ENV_PARSE_RESPONSE" | jq '.envVars')
 
@@ -516,10 +541,10 @@ echo "Agent configuration:"
 echo "$AGENT_JSON" | jq '.'
 echo ""
 
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_agent_response.txt -X POST "$KAGENTI_API/api/v1/agents" \
+HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_agent_response.txt -X POST "$KAGENTI_API/api/v1/agents" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -d "$AGENT_JSON")
+    -d "$AGENT_JSON") || true
 
 RESPONSE=$(cat /tmp/kagenti_agent_response.txt)
 
@@ -527,7 +552,12 @@ echo "API Response (HTTP $HTTP_CODE):"
 echo "$RESPONSE"
 echo ""
 
-if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Agent deployment successful"
 elif [ "$HTTP_CODE" = "409" ]; then
     echo "✓ Agent already exists (HTTP 409)"
