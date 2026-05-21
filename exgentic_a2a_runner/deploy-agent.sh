@@ -63,7 +63,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
-            echo "  --ibac                     Inject the IBAC sidecar + Envoy overlay into the agent pod"
+            echo "  --ibac                     Enable IBAC by patching the authbridge sidecar's plugin pipeline"
             echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
             echo ""
