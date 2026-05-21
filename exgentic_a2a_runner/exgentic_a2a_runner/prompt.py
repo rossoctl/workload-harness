@@ -30,13 +30,6 @@ def build_prompt(task: str, session_id: str, context: Optional[Dict[str, Any]] =
         for key, value in context.items():
             prompt_parts.append(f"- {key}: {value}")
     
-    prompt_parts.append(f"""
-IMPORTANT: Use session id "{session_id}" in all your interactions with the benchmark tools.
-
-When calling any benchmark-related tools or APIs, you MUST include the session_id parameter with the value "{session_id}". This ensures your actions are properly tracked and evaluated within the correct benchmark session.
-
-If you are asked to submit an answer, make sure you call the submit MCP tool.""")
-
     return "\n".join(prompt_parts)
 
 

@@ -295,18 +295,25 @@ echo ""
 # Step 6: Set up port-forward to Kagenti backend
 echo "Step 6: Setting up port-forward to Kagenti backend..."
 
-# Check if port-forward is already running
-if nc -z localhost $KAGENTI_PORT 2>/dev/null; then
-    echo "✓ Port $KAGENTI_PORT is already in use (assuming Kagenti backend is accessible)"
+# Check if Kagenti API is actually responding (not just port open)
+if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
 else
+    # Kill any stale port-forward that has the port open but isn't working
+    if nc -z localhost $KAGENTI_PORT 2>/dev/null; then
+        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
+        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+
     echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
     kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
     PORT_FORWARD_PID=$!
-    
+
     # Wait for port-forward to be ready
     echo "Waiting for port-forward to be ready..."
     for i in {1..10}; do
-        if curl -s $KAGENTI_API/api/v1/namespaces >/dev/null 2>&1; then
+        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
             echo "✓ Port-forward is ready"
             break
         fi
@@ -323,10 +330,15 @@ echo ""
 
 # Step 7: Delete existing tool via Kagenti API if it exists
 echo "Step 7: Deleting existing tool via Kagenti API if it exists..."
-DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_delete_response.txt -X DELETE "$KAGENTI_API/api/v1/tools/$NAMESPACE/$TOOL_NAME" \
-    -H "Authorization: Bearer $ACCESS_TOKEN")
+DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete_response.txt -X DELETE "$KAGENTI_API/api/v1/tools/$NAMESPACE/$TOOL_NAME" \
+    -H "Authorization: Bearer $ACCESS_TOKEN") || true
 
-if [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
+if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Tool deleted or did not exist (HTTP $DELETE_RESPONSE)"
 else
     echo "Warning: Delete returned HTTP $DELETE_RESPONSE"
@@ -337,7 +349,24 @@ fi
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     echo "Deleting existing MCP Gateway resources if they exist..."
     kubectl delete httproute "${TOOL_NAME}-route" -n "$NAMESPACE" --ignore-not-found
-    kubectl delete mcpserverregistrations "${TOOL_NAME}-servers" -n "$NAMESPACE" --ignore-not-found
+    
+    # List all mcpserverregistrations before deletion
+    echo "Listing all MCPServerRegistrations in namespace $NAMESPACE..."
+    EXISTING_REGS=$(kubectl get mcpserverregistrations -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    
+    if [ -n "$EXISTING_REGS" ]; then
+        echo "Found MCPServerRegistrations to delete:"
+        for reg in $EXISTING_REGS; do
+            echo "  - $reg"
+        done
+        
+        # Delete all mcpserverregistrations in the namespace
+        kubectl delete mcpserverregistrations --all -n "$NAMESPACE" --ignore-not-found
+        echo "✓ All MCPServerRegistrations deleted"
+    else
+        echo "✓ No MCPServerRegistrations found to delete"
+    fi
+    
     echo "✓ MCP Gateway resources cleaned up"
 fi
 
@@ -441,10 +470,10 @@ if [[ "$BENCHMARK_NAME" == tau* ]] && [ -n "$MODEL_NAME" ]; then
 fi
 
 # Set EXGENTIC_SET_BENCHMARK_RUNNER based on benchmark type
-#if [[ "$BENCHMARK_NAME" == "gsm8k" ]]; then
-#    echo "Adding EXGENTIC_SET_BENCHMARK_RUNNER=process for gsm8k benchmark"
-#   ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"EXGENTIC_SET_BENCHMARK_RUNNER\", \"value\": \"process\"}]")
-#fi
+if [[ "$BENCHMARK_NAME" == "gsm8k" ]]; then
+    echo "Adding EXGENTIC_SET_BENCHMARK_RUNNER=direct for gsm8k benchmark"
+    ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"EXGENTIC_SET_BENCHMARK_RUNNER\", \"value\": \"direct\"}]")
+fi
 
 echo "✓ Environment variables prepared for deployment"
 echo ""
@@ -483,10 +512,10 @@ echo "$TOOL_JSON"
 echo ""
 
 # Deploy tool using official Kagenti API with authentication
-HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/kagenti_response.txt -X POST "$KAGENTI_API/api/v1/tools" \
+HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_response.txt -X POST "$KAGENTI_API/api/v1/tools" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -d "$TOOL_JSON")
+    -d "$TOOL_JSON") || true
 
 RESPONSE=$(cat /tmp/kagenti_response.txt)
 
@@ -495,7 +524,12 @@ echo "$RESPONSE"
 echo ""
 
 # Check if deployment was successful
-if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
+    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
+    echo "Please ensure the port-forward to kagenti-backend is running:"
+    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    exit 1
+elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Tool deployment successful"
 elif [ "$HTTP_CODE" = "409" ]; then
     echo "✓ Tool already exists (HTTP 409)"
@@ -572,10 +606,10 @@ echo ""
 # Step 12.1: Set resource limits
 echo "Step 12.1: Setting resource limits..."
 
-# Set CPU limit to 4 cores and memory limit to 3GB
+# Set CPU limit to 4 cores and memory limit to 4GB
 kubectl set resources deployment/$TOOL_NAME -n $NAMESPACE \
-    --limits=cpu=4,memory=3Gi \
-    --requests=cpu=500m,memory=512Mi 2>/dev/null && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 3Gi)" || echo "Warning: Could not set resource limits"
+    --limits=cpu=4,memory=4Gi \
+    --requests=cpu=500m,memory=512Mi 2>/dev/null && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 4Gi)" || echo "Warning: Could not set resource limits"
 
 echo ""
 
@@ -701,13 +735,13 @@ ROUTE_EOF
 
     echo "Creating MCPServerRegistration for $TOOL_NAME..."
     kubectl apply -f - <<REG_EOF
-apiVersion: mcp.kuadrant.io/v1alpha1
+apiVersion: mcp.kagenti.com/v1alpha1
 kind: MCPServerRegistration
 metadata:
   name: ${TOOL_NAME}-servers
   namespace: ${NAMESPACE}
 spec:
-  toolPrefix: exgentic_
+  toolPrefix: exgentic_${BENCHMARK_NAME}_
   targetRef:
     group: gateway.networking.k8s.io
     kind: HTTPRoute

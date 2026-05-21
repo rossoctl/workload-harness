@@ -17,10 +17,11 @@ fi
 # Default values (env vars from .env take precedence, CLI args override both)
 BENCHMARK_NAME=""
 AGENT_NAME=""
+EXPERIMENT_NAME="default"
 MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
-PHOENIX_OTEL_ENABLED="false"
+MLFLOW_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_IBAC="${IBAC_ENABLED:-false}"
 
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             AGENT_NAME="$2"
             shift 2
             ;;
+        --experiment)
+            EXPERIMENT_NAME="$2"
+            shift 2
+            ;;
         --model)
             MODEL_NAME="$2"
             shift 2
@@ -47,8 +52,8 @@ while [[ $# -gt 0 ]]; do
             KEYCLOAK_PASSWORD="$2"
             shift 2
             ;;
-        --phoenix-otel)
-            PHOENIX_OTEL_ENABLED="true"
+        --mlflow)
+            MLFLOW_ENABLED="true"
             shift
             ;;
         --use-mcp-gateway)
@@ -71,10 +76,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --agent NAME               Agent name (e.g., tool_calling, generic_agent)"
             echo ""
             echo "Optional Arguments:"
+            echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
-            echo "  --phoenix-otel             Port-forward Phoenix OTLP during evaluation"
+            echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --ibac                     Enable IBAC by patching the authbridge sidecar's plugin pipeline"
             echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
@@ -82,9 +88,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark tau2 --agent tool_calling"
+            echo "  $0 --benchmark tau2 --agent tool_calling --experiment baseline"
             echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini"
             echo "  $0 --benchmark gsm8k --agent generic_agent --model Azure/gpt-4o"
-            echo "  $0 --benchmark gsm8k --agent tool_calling --phoenix-otel"
+            echo "  $0 --benchmark gsm8k --agent tool_calling --mlflow --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             echo ""
             echo "This script will:"
@@ -130,7 +137,7 @@ echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent: $AGENT_NAME"
 echo "Model: $MODEL_NAME"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
-echo "Phoenix OTEL: $PHOENIX_OTEL_ENABLED"
+echo "MLflow tracing: $MLFLOW_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
 echo "IBAC: $USE_IBAC"
 echo ""
@@ -190,9 +197,12 @@ echo ""
 echo "=========================================="
 echo "Step 3/3: Running Evaluation"
 echo "=========================================="
-EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME")
-if [ "$PHOENIX_OTEL_ENABLED" = "true" ]; then
-    EVALUATE_ARGS+=(--phoenix-otel)
+EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
+if [ "$MLFLOW_ENABLED" = "true" ]; then
+    EVALUATE_ARGS+=(--mlflow)
+fi
+if [ "$USE_MCP_GATEWAY" = "true" ]; then
+    EVALUATE_ARGS+=(--use-mcp-gateway)
 fi
 
 "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}"
@@ -208,6 +218,7 @@ echo "✓ All steps completed successfully!"
 echo "=========================================="
 echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent: $AGENT_NAME"
+echo "Experiment: $EXPERIMENT_NAME"
 echo "Model: $MODEL_NAME"
 echo "=========================================="
 

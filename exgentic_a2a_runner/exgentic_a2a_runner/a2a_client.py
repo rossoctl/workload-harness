@@ -42,6 +42,7 @@ class A2AProxyClient:
         prompt: str,
         poll_interval_s: float = 0.5,
         timeout_s: Optional[float] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Send prompt to A2A endpoint and get response.
 
@@ -49,6 +50,7 @@ class A2AProxyClient:
             prompt: The prompt text to send
             poll_interval_s: Unused (kept for API compatibility)
             timeout_s: Timeout for task completion (default: config timeout)
+            session_id: Session ID to pass via A2A request metadata
 
         Returns:
             Plain text response from the agent
@@ -67,9 +69,9 @@ class A2AProxyClient:
             except ImportError:
                 pass
 
-        return self._run_async(self._async_send_prompt(prompt, timeout_s, otel_context))
+        return self._run_async(self._async_send_prompt(prompt, timeout_s, otel_context, session_id))
 
-    async def _async_send_prompt(self, prompt: str, timeout_s: float, otel_context=None) -> str:
+    async def _async_send_prompt(self, prompt: str, timeout_s: float, otel_context=None, session_id: Optional[str] = None) -> str:
         """Async implementation using the standard a2a-sdk."""
         import uuid
 
@@ -137,7 +139,8 @@ class A2AProxyClient:
             task_id = None
             event_count = 0
 
-            async for response in client.send_message(message):
+            request_metadata = {"session_id": session_id} if session_id else None
+            async for response in client.send_message(message, request_metadata=request_metadata):
                 event_count += 1
 
                 if isinstance(response, tuple):

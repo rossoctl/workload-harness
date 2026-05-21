@@ -4,7 +4,8 @@ This repository contains workload harnesses for driving test and evaluation traf
 
 ## Current Scope
 
-- Includes the AppWorld harness as the first supported workload driver.
+- **AppWorld harness** (`appworld_a2a_runner/`) — the first supported workload driver.
+- **Exgentic harness** (`exgentic_a2a_runner/`) — drives Exgentic benchmarks (tau2, gsm8k, appworld) against Kagenti agents via A2A protocol.
 - Designed to expand to additional workload drivers over time.
 
 ## Purpose
