@@ -211,6 +211,7 @@ class OTELInstrumentation:
         agent_name: str,
         task_id: str,
         num_parallel_tasks: int,
+        experiment_name: str = "default",
     ) -> Iterator[trace.Span]:
         """Create a span for session processing.
 
@@ -223,6 +224,7 @@ class OTELInstrumentation:
             agent_name: Name of the agent being tested
             task_id: Task identifier
             num_parallel_tasks: Number of parallel tasks configured
+            experiment_name: Name of the experiment (for grouping/filtering runs)
 
         Yields:
             Span object for adding events and attributes
@@ -242,18 +244,19 @@ class OTELInstrumentation:
         ) as span:
             # Set span kind to CHAIN for OpenInference
             span.set_attribute("openinference.span.kind", "CHAIN")
-            
+
             # Set span attributes
             span.set_attribute("metadata.session_id", session_id)
             span.set_attribute("metadata.mcp_server_url", mcp_server_url)
             span.set_attribute("metadata.a2a_url", a2a_base_url)
             span.set_attribute("metadata.timeout_seconds", a2a_timeout)
-            
+
             # Set metadata attributes (using metadata. prefix for Arize Phoenix)
             span.set_attribute("metadata.benchmark_name", benchmark_name)
             span.set_attribute("metadata.agent_name", agent_name)
             span.set_attribute("metadata.task_id", task_id)
             span.set_attribute("metadata.num_parallel_tasks", num_parallel_tasks)
+            span.set_attribute("metadata.experiment_name", experiment_name)
 
             try:
                 yield span

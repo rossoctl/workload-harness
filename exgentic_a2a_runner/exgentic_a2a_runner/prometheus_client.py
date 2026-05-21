@@ -74,7 +74,7 @@ class PrometheusMetricsCollector:
         # Ensure window is at least 60s so increase()/max_over_time() have
         # enough data points (Prometheus scrape interval is typically 15-30s,
         # need at least 2 scrapes for increase() to compute a delta).
-        duration = max(int(end - start), 60)
+        duration = max(int(end - start), 1)
 
         # CPU usage as average utilization % of limit over the window
         # rate() gives per-second CPU usage, quota/period gives the limit in cores

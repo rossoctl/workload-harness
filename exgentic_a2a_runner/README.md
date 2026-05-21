@@ -5,24 +5,21 @@ A standalone Python runner that integrates Exgentic benchmarks with Kagenti agen
 ## Features
 
 - **Exgentic MCP Integration**: Communicates with Exgentic MCP server for benchmark tasks
-- **Parallel session processing**: Configurable concurrency for efficient benchmark execution
+- **Parallel session processing**: Configurable concurrency for efficient benchmark execution and stress testing
 - **A2A protocol support**: Communicates with remote agents using the A2A protocol via JSON-RPC over HTTP
-- **Session lifecycle management**: Explicit create → use → evaluate → close pattern
 - **OpenTelemetry instrumentation**: Comprehensive traces, metrics, and logs
 - **Strict failure handling**: Any error or timeout marks the session as failed
 - **Configurable via environment variables**: Easy deployment and configuration
-- **Official MCP SDK**: Uses the MCP Python SDK for reliable protocol communication
 
 ## Architecture
 
 The runner follows this execution model for each benchmark session:
 
 1. **Create Session**: `(session_id, task) = mcp_server.create_session()`
-2. **Build Prompt**: Include session_id in task instructions
-3. **Invoke Agent**: `agent.invoke_agent("{task}. Use session id {session_id}")`
-4. **Evaluate Session**: `success = mcp_server.evaluate_session(session_id)`
-5. **Close Session**: `mcp_server.close_session(session_id)`
-6. **Record Statistics**: Track completion time and success rate
+2. **Invoke Agent**: `agent.invoke_agent("{task}")` . Pass session_id as meta_data.
+3. **Evaluate Session**: `success = mcp_server.evaluate_session(session_id)`
+4. **Close Session**: `mcp_server.close_session(session_id)`
+5. **Record Statistics**: Track completion time, success rate, compute costs, tokens.
 
 ## Installation
 
@@ -33,7 +30,7 @@ The runner follows this execution model for each benchmark session:
 - Python 3.11 or 3.12 (Python 3.13+ is **not supported** due to dependency compatibility)
   - **Note:** The `uv` package manager will automatically use Python 3.12 when you run `uv sync --python 3.12`, regardless of your system Python version
 - [uv](https://docs.astral.sh/uv/) package manager
-- kubectl configured with `kind-kagenti` context
+- kubectl v0.6.0 (tested on v0.6.0-rc.2) 
 - Kagenti cluster running with:
   - Kagenti backend in `kagenti-system` namespace
   - Keycloak in `keycloak` namespace
@@ -47,11 +44,8 @@ The runner follows this execution model for each benchmark session:
 git clone git@github.com:kagenti/kagenti.git
 cd kagenti
 
-# Create secret values file (required before installation)
-cp deployments/envs/secret_values.yaml.example deployments/envs/.secret_values.yaml
-# Edit .secret_values.yaml if you need to add API keys or credentials
+env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all
 
-deployments/ansible/run-install.sh --env dev --preload --extra-vars '{"container_engine": "podman"}'
 ```
 
 
@@ -175,11 +169,7 @@ USE_MCP_GATEWAY=true
 
 ### Tool Prefix
 
-The MCP Gateway exposes tools under a namespace prefix (default `exgentic_`). The runner reads `EXGENTIC_MCP_TOOL_PREFIX` and prepends it to every MCP tool call. When using the gateway via `evaluate-benchmark.sh`, this variable is set automatically. For manual runs you can export it yourself:
-
-```bash
-export EXGENTIC_MCP_TOOL_PREFIX=exgentic_
-```
+The MCP Gateway exposes tools under a namespace prefix (default `exgentic_<benchmark_name>`). The runner reads `EXGENTIC_MCP_TOOL_PREFIX` and prepends it to every MCP tool call. When using the gateway via `evaluate-benchmark.sh`, this variable is set automatically. 
 
 ## Configuration
 
@@ -245,7 +235,7 @@ The `deploy-and-evaluate.sh` script provides a convenient way to deploy both the
 
 ```bash
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
-./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --phoenix-otel
+./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --mlflow
 ```
 
 This script will:
@@ -253,15 +243,15 @@ This script will:
 2. Deploy the agent
 3. Run the evaluation
 
-When [`--phoenix-otel`](exgentic_a2a_runner/deploy-and-evaluate.sh) is supplied, it is passed through to [`evaluate-benchmark.sh`](exgentic_a2a_runner/evaluate-benchmark.sh) for Phoenix OTLP port-forwarding during the evaluation step.
+When `--mlflow` is supplied, it is passed through to `evaluate-benchmark.sh` to enable MLflow tracing via the OTEL Collector during the evaluation step.
 
 **Options:**
 ```bash
 # Basic usage with defaults
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
 
-# With Phoenix OTEL forwarding during evaluation
-./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --phoenix-otel
+# With MLflow tracing enabled during evaluation
+./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --mlflow
 
 # Route MCP traffic through the MCP Gateway
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --use-mcp-gateway
@@ -280,7 +270,7 @@ When [`--phoenix-otel`](exgentic_a2a_runner/deploy-and-evaluate.sh) is supplied,
 
 The `evaluate-benchmark.sh` script automatically:
 - Sets up port forwarding (MCP server on localhost:7770, A2A agent on localhost:7701)
-- Optionally port-forwards Phoenix OTLP on localhost:4317 with `--phoenix-otel`
+- Optionally port-forwards the OTEL Collector (traces → MLflow) with `--mlflow`
 - Waits for pods to be ready
 - Tests connectivity to the forwarded services
 - Runs the benchmark evaluation
@@ -289,32 +279,8 @@ The `evaluate-benchmark.sh` script automatically:
 
 ```bash
 ./evaluate-benchmark.sh --benchmark tau2 --agent tool_calling
-./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --phoenix-otel
+./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --mlflow
 ```
-
-When [`--phoenix-otel`](exgentic_a2a_runner/evaluate-benchmark.sh) is enabled, the script:
-- port-forwards the Phoenix OTLP service from `kagenti-system/phoenix` to `localhost:4317`
-- verifies cluster reachability early using [`kubectl cluster-info`](exgentic_a2a_runner/evaluate-benchmark.sh:109)
-- exports:
-  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`
-  - `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`
-  - `OTEL_EXPORTER_OTLP_INSECURE=true`
-
-To open the Phoenix UI from your host:
-```bash
-kubectl port-forward -n kagenti-system svc/phoenix 6006:6006
-```
-
-Then browse to:
-```text
-http://localhost:6006
-```
-
-If you want both UI access and OTLP ingest at the same time:
-```bash
-kubectl port-forward -n kagenti-system svc/phoenix 6006:6006 4317:4317
-```
-
 
 ## Output
 
@@ -427,59 +393,31 @@ Each session creates a span (`exgentic_a2a.session`) with:
 
 ## OpenTelemetry and Observability
 
-### Using Phoenix in the kind Cluster
+### Using MLflow in the kind Cluster
 
-The Kagenti cluster already exposes a Phoenix service in the `kagenti-system` namespace.
+The Kagenti cluster exposes an MLflow service in the `kagenti-system` namespace. An OTEL Collector forwards traces to MLflow's `/v1/traces` endpoint with OAuth2 authentication.
 
-#### 1. Send runner telemetry to Phoenix
+#### 1. Send runner telemetry to MLflow
 
-Use [`--phoenix-otel`](exgentic_a2a_runner/evaluate-benchmark.sh) so the script automatically port-forwards Phoenix OTLP and configures the required environment variables:
-
-```bash
-env MAX_TASKS=1 MAX_PARALLEL_SESSIONS=1 ./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --phoenix-otel
-```
-
-This forwards Phoenix OTLP gRPC to `localhost:4317` and exports telemetry before launching the runner.
-
-#### 2. Open the Phoenix UI
+Use `--mlflow` so the script automatically port-forwards the OTEL Collector and configures the required environment variables:
 
 ```bash
-kubectl port-forward -n kagenti-system svc/phoenix 6006:6006
+env MAX_TASKS=1 MAX_PARALLEL_SESSIONS=1 ./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --mlflow
 ```
 
-Then open:
-- **Phoenix UI**: `http://localhost:6006`
-- **Phoenix GraphQL**: `http://localhost:6006/graphql`
+#### 2. Open the MLflow UI
 
-#### 3. Recover kind access if the cluster becomes unreachable
-
-If [`kubectl cluster-info`](exgentic_a2a_runner/evaluate-benchmark.sh:109) fails with `connection refused` while using the `kind-kagenti` context, the underlying Podman-backed kind control-plane container may be stopped.
-
-Check the cluster runtime:
-```bash
-kind get clusters
-podman ps -a | grep kagenti-control-plane
-```
-
-If the control-plane container is exited, restore it with:
-```bash
-podman machine stop podman-machine-default || true
-podman machine start podman-machine-default
-podman start kagenti-control-plane
-kubectl cluster-info
-```
-
-In the observed failure, the control-plane container had exited and starting [`kagenti-control-plane`](exgentic_a2a_runner/evaluate-benchmark.sh) restored access immediately.
-```
+Open http://mlflow.localtest.me:8080 in your browser to view traces and experiments.
 
 ### Analyzing Traces with analyze-run.sh
 
-The [`analyze-run.sh`](exgentic_a2a_runner/analyze-run.sh) script provides comprehensive trace analysis by downloading Agent.Session traces from Phoenix and generating detailed performance reports.
+The [`analyze-run.sh`](analyze-run.sh) script provides comprehensive trace analysis by downloading Agent.Session traces from MLflow and generating detailed performance reports.
 
 #### Features
 
-- **Automatic Phoenix connectivity**: Connects to Phoenix GraphQL API with optional auto port-forwarding
+- **Automatic MLflow connectivity**: Connects to MLflow REST API with OAuth2 authentication and optional auto port-forwarding
 - **Trace filtering**: Downloads Agent.Session root spans and all child spans
+- **Experiment filtering**: Filter or compare traces by experiment name
 - **Performance metrics**: Calculates timing statistics (avg, p50, p95, min, max) for:
   - Session creation time
   - Agent call time (end-to-end agent execution)
@@ -492,37 +430,42 @@ The [`analyze-run.sh`](exgentic_a2a_runner/analyze-run.sh) script provides compr
 #### Usage
 
 ```bash
-# Basic usage (assumes Phoenix is accessible at localhost:6006)
+# Basic usage (assumes MLflow is accessible at http://mlflow.localtest.me:8080)
 ./analyze-run.sh
 
-# With custom Phoenix URL and limit
-./analyze-run.sh --url http://localhost:6006/graphql --limit 200
+# With custom MLflow URL and limit
+./analyze-run.sh --url http://mlflow.localtest.me:8080 --limit 200
 
-# Auto port-forward from kind cluster if Phoenix is not accessible locally
+# Auto port-forward from kind cluster if MLflow is not accessible locally
 ./analyze-run.sh --forward --limit 50
 
-# Specify a different Phoenix project
-./analyze-run.sh --project my-project --limit 100
+# Filter by experiment name
+./analyze-run.sh --experiment baseline
+
+# Compare two experiments
+./analyze-run.sh --compare baseline,test1
 ```
 
 #### Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-u, --url URL` | Phoenix GraphQL endpoint URL | `http://localhost:6006/graphql` |
+| `-u, --url URL` | MLflow REST API base URL | `http://mlflow.localtest.me:8080` |
 | `-l, --limit NUM` | Maximum number of traces to download | `100` |
-| `-p, --project NAME` | Phoenix project name | `default` |
-| `-f, --forward` | Auto port-forward Phoenix from kind cluster if not accessible | `false` |
+| `-e, --experiment NAME` | Filter traces by experiment name attribute | (none) |
+| `-c, --compare EXP1,EXP2` | Compare two experiments (comma-separated) | (none) |
+| `--experiment-id ID` | MLflow experiment ID to query | `0` |
+| `-f, --forward` | Auto port-forward MLflow from kind cluster if not accessible | `false` |
 | `-h, --help` | Show help message | - |
 
 #### How It Works
 
-1. **Connectivity Test**: Attempts to connect to Phoenix GraphQL API
-2. **Auto Port-Forward** (if `--forward` is used): Sets up port-forwarding from kind cluster if Phoenix is not accessible
-3. **Project Resolution**: Resolves the Phoenix project ID from the project name
-4. **Trace Discovery**: Queries for Agent.Session root spans, sorted by creation time (most recent first)
-5. **Full Trace Download**: For each trace ID, downloads all child spans (limited to 500 spans per trace)
-6. **Analysis**: Pipes trace data to [`analyze_traces.py`](exgentic_a2a_runner/analyze_traces.py) for detailed analysis
+1. **Connectivity Test**: Attempts to connect to MLflow REST API health endpoint
+2. **Auto Port-Forward** (if `--forward` is used): Sets up port-forwarding from kind cluster if MLflow is not accessible
+3. **OAuth2 Authentication**: Obtains a bearer token from the cluster's `mlflow-oauth-secret`
+4. **Trace Download**: Queries MLflow's trace API for the specified experiment, with pagination
+5. **Format Transformation**: Converts MLflow trace format to the analysis input format via [`download_mlflow_traces.py`](download_mlflow_traces.py)
+6. **Analysis**: Pipes trace data to [`analyze_traces.py`](analyze_traces.py) for detailed analysis
 
 #### Report Output
 
@@ -554,15 +497,16 @@ Lists each trace with:
 #### Example Output
 
 ```
-=== Phoenix Trace Analysis ===
-Phoenix URL: http://localhost:6006/graphql
-Project: default
+=== MLflow Trace Analysis ===
+MLflow URL: http://mlflow.localtest.me:8080
+Experiment ID: 0
 Limit: 100
 
-✓ Connected to Phoenix (project: default, id: UHJvamVjdDox)
+✓ Connected to MLflow
+✓ OAuth token obtained
 
 Found 45 Agent.Session traces
-Downloading full traces with child spans...
+Downloading traces...
 Downloaded 45 traces
 
 === Trace Analysis Report ===
@@ -579,7 +523,7 @@ Summary Statistics by Configuration:
 
 #### Prerequisites
 
-- **jq**: JSON processor for parsing GraphQL responses
+- **jq**: JSON processor for parsing API responses
   ```bash
   # macOS
   brew install jq
@@ -587,38 +531,25 @@ Summary Statistics by Configuration:
   # Ubuntu/Debian
   apt-get install jq
   ```
-- **Python 3**: For running the analysis script
-- **Phoenix**: Running and accessible (either locally or in kind cluster)
+- **Python 3**: For running the download and analysis scripts
+- **MLflow**: Running and accessible (either locally or in kind cluster)
+- **kubectl**: For port-forwarding and OAuth token retrieval
 
 #### Troubleshooting
 
 **Connection refused:**
-- Ensure Phoenix is running: `kubectl get pods -n kagenti-system -l app=phoenix`
+- Ensure MLflow is running: `kubectl get pods -n kagenti-system -l app=mlflow`
 - Use `--forward` flag to auto port-forward from kind cluster
-- Manually port-forward: `kubectl port-forward -n kagenti-system svc/phoenix 6006:6006`
+- Manually port-forward: `kubectl port-forward -n kagenti-system svc/mlflow 8080:5000`
 
 **No traces found:**
-- Verify traces exist in Phoenix UI: `http://localhost:6006`
+- Verify traces exist in MLflow UI: http://mlflow.localtest.me:8080
 - Check that Agent.Session spans are being created by the runner
-- Ensure OTEL is enabled in the runner configuration
+- Ensure OTEL is enabled and `--mlflow` flag is passed to `evaluate-benchmark.sh`
 
-**GraphQL errors:**
-- Check Phoenix version compatibility
-- Verify the project name exists: `./analyze-run.sh` will list available projects on error
-
-#### 4. View Traces in Jaeger UI
-
-1. Open http://localhost:16686 in your browser
-2. Select `exgentic-a2a-runner` from the Service dropdown
-3. Click "Find Traces" to see all sessions
-4. Click on individual traces to see detailed spans
-
-#### 5. Stop Jaeger
-
-```bash
-docker stop jaeger
-docker rm jaeger
-```
+**OAuth errors:**
+- Ensure the `mlflow-oauth-secret` exists in the `kagenti-system` namespace
+- Verify the MLflow pod is running (token acquisition executes inside the pod)
 
 ### What Gets Traced
 

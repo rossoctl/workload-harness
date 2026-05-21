@@ -41,6 +41,7 @@ class ExgenticConfig:
     max_parallel_sessions: int = 1
     benchmark_name: str = "unknown"
     agent_name: str = "unknown"
+    experiment_name: str = "default"
 
     @classmethod
     def from_env(cls) -> "ExgenticConfig":
@@ -58,6 +59,7 @@ class ExgenticConfig:
             max_parallel_sessions=_get_int("MAX_PARALLEL_SESSIONS", 1) or 1,
             benchmark_name=os.getenv("BENCHMARK_NAME", "unknown"),
             agent_name=os.getenv("AGENT_NAME", "unknown"),
+            experiment_name=os.getenv("EXPERIMENT_NAME", "default"),
         )
 
 

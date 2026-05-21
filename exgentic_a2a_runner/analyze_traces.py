@@ -30,6 +30,7 @@ class TraceRecord:
     num_parallel: int
     status: str
     total_latency_s: float
+    experiment_name: str = "default"
     start_time: str = ""
     evaluation_result: bool | None = None
 
@@ -43,6 +44,7 @@ class TraceRecord:
     time_to_first_obs_s: float = 0.0
     overhead_s: float = 0.0
     llm_count: int = 0
+    llm_count_after_obs: int = 0
     tool_count: int = 0
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
@@ -103,6 +105,7 @@ def parse_traces(data: dict) -> list[TraceRecord]:
         # Extract grouping fields
         agent_name = meta.get("agent_name", "unknown")
         benchmark_name = meta.get("benchmark_name", "unknown")
+        experiment_name = meta.get("experiment_name", "default")
         num_parallel = int(meta.get("num_parallel_tasks", 0))
         session_id = meta.get("session_id", "unknown")
         status = root.get("statusCode", "UNSET")
@@ -128,6 +131,7 @@ def parse_traces(data: dict) -> list[TraceRecord]:
             num_parallel=num_parallel,
             status=status,
             total_latency_s=(root.get("latencyMs") or 0) / 1000.0,
+            experiment_name=experiment_name,
             start_time=root.get("startTime", ""),
             evaluation_result=evaluation_result,
         )
@@ -191,16 +195,23 @@ def parse_traces(data: dict) -> list[TraceRecord]:
             record.llm_output_tokens += int(token_count.get("completion", 0) or 0)
 
             # Classify as before or after initial observation
+            is_after_obs = False
             if t_obs and chat_start_str:
                 try:
                     t_chat = datetime.fromisoformat(chat_start_str.replace("Z", "+00:00"))
                     if t_chat >= t_obs:
                         record.llm_after_obs_s += chat_latency
+                        is_after_obs = True
                 except (ValueError, TypeError):
                     record.llm_after_obs_s += chat_latency
+                    is_after_obs = True
             else:
                 # No initial_observation — count all as "after"
                 record.llm_after_obs_s += chat_latency
+                is_after_obs = True
+            
+            if is_after_obs:
+                record.llm_count_after_obs += 1
 
         # Time to first observation: invoke_agent start → initial_observation start
         if invoke_start and initial_obs_start:
@@ -254,6 +265,13 @@ def avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    m = avg(values)
+    return (sum((x - m) ** 2 for x in values) / (len(values) - 1)) ** 0.5
+
+
 def format_time(iso: str) -> str:
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -267,21 +285,21 @@ def print_report(records: list[TraceRecord]) -> None:
         print("No Agent.Session traces found.")
         return
 
-    # Group by (agent_name, benchmark_name, model, num_parallel)
+    # Group by (experiment_name, agent_name, benchmark_name, model, num_parallel)
     groups: dict[tuple, list[TraceRecord]] = defaultdict(list)
     for r in records:
-        key = (r.agent_name, r.benchmark_name, r.model, r.num_parallel)
+        key = (r.experiment_name, r.agent_name, r.benchmark_name, r.model, r.num_parallel)
         groups[key].append(r)
 
     for key, traces in sorted(groups.items()):
-        agent, benchmark, model, num_parallel = key
+        experiment, agent, benchmark, model, num_parallel = key
         n = len(traces)
         errors = sum(1 for t in traces if t.status == "ERROR")
         eval_success = sum(1 for t in traces if t.evaluation_result is True)
 
-        print("=" * 90)
-        print(f"Agent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}  |  Parallel: {num_parallel}")
-        print("=" * 90)
+        print("=" * 100)
+        print(f"Experiment: {experiment}  |  Agent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}  |  Parallel: {num_parallel}")
+        print("=" * 100)
         print()
 
         # Counts
@@ -324,10 +342,17 @@ def print_report(records: list[TraceRecord]) -> None:
         row("Evaluation (s)", eval_times)
 
         print()
-        print(f"  Avg LLM calls/session:     {avg(llm_counts):.1f}")
-        print(f"  Avg Tool calls/session:    {avg(tool_counts):.1f}")
+        llm_counts_f = [float(x) for x in llm_counts]
+        tool_counts_f = [float(x) for x in tool_counts]
+        llm_counts_after_obs_f = [float(t.llm_count_after_obs) for t in traces]
+        print(f"  Avg LLM calls/session:     {avg(llm_counts_after_obs_f):.1f}  (std: {std(llm_counts_after_obs_f):.1f})")
+        print(f"  Avg Tool calls/session:    {avg(tool_counts_f):.1f}  (std: {std(tool_counts_f):.1f})")
         if any(llm_after_obs_times):
-            print(f"  Avg LLM call latency:      {avg([t.llm_after_obs_s / max(t.llm_count - 1, 1) for t in traces if t.llm_count > 0]):.2f}s")
+            llm_latencies = [t.llm_after_obs_s / max(t.llm_count_after_obs, 1) for t in traces if t.llm_count_after_obs > 0]
+            print(f"  Avg LLM call latency:      {avg(llm_latencies):.2f}s  (std: {std(llm_latencies):.2f}s)")
+        if any(tool_times):
+            tool_latencies = [t.tool_total_s / max(t.tool_count, 1) for t in traces if t.tool_count > 0]
+            print(f"  Avg Tool call latency:     {avg(tool_latencies):.2f}s  (std: {std(tool_latencies):.2f}s)")
 
         # Time breakdown as % of agent call time
         # TTFO = time before first observation (includes first LLM call + startup)
@@ -339,22 +364,23 @@ def print_report(records: list[TraceRecord]) -> None:
         tool_pcts = [(t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
         overhead_pcts = [(t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
         if any(ttfo_pcts):
-            print(f"  Avg % time before 1st Obs: {avg(ttfo_pcts):.1f}%")
+            print(f"  Avg % time before 1st Obs: {avg(ttfo_pcts):.1f}%  (std: {std(ttfo_pcts):.1f}%)")
         if any(llm_pcts):
-            print(f"  Avg % time on LLM calls:   {avg(llm_pcts):.1f}%")
+            print(f"  Avg % time on LLM calls:   {avg(llm_pcts):.1f}%  (std: {std(llm_pcts):.1f}%)")
         if any(tool_pcts):
-            print(f"  Avg % time on Tool calls:  {avg(tool_pcts):.1f}%")
+            print(f"  Avg % time on Tool calls:  {avg(tool_pcts):.1f}%  (std: {std(tool_pcts):.1f}%)")
         if any(overhead_pcts):
-            print(f"  Avg % time overhead:       {avg(overhead_pcts):.1f}%")
-        
-        input_tokens = [t.llm_input_tokens for t in traces]
-        output_tokens = [t.llm_output_tokens for t in traces]
+            print(f"  Avg % time overhead:       {avg(overhead_pcts):.1f}%  (std: {std(overhead_pcts):.1f}%)")
+
+        input_tokens = [float(t.llm_input_tokens) for t in traces]
+        output_tokens = [float(t.llm_output_tokens) for t in traces]
+        total_tokens = [i + o for i, o in zip(input_tokens, output_tokens)]
         if any(input_tokens):
-            print(f"  Avg LLM input tokens:      {avg(input_tokens):.0f}")
+            print(f"  Avg LLM input tokens:      {avg(input_tokens):.0f}  (std: {std(input_tokens):.0f})")
         if any(output_tokens):
-            print(f"  Avg LLM output tokens:     {avg(output_tokens):.0f}")
+            print(f"  Avg LLM output tokens:     {avg(output_tokens):.0f}  (std: {std(output_tokens):.0f})")
         if any(input_tokens) or any(output_tokens):
-            print(f"  Avg LLM total tokens:      {avg([i + o for i, o in zip(input_tokens, output_tokens)]):.0f}")
+            print(f"  Avg LLM total tokens:      {avg(total_tokens):.0f}  (std: {std(total_tokens):.0f})")
 
         # Infrastructure metrics (only from traces that have infra data)
         infra_traces = [t for t in traces if t.has_infra]
@@ -397,7 +423,7 @@ def print_report(records: list[TraceRecord]) -> None:
     print("=" * 140)
     print()
     header = (
-        f"{'Timestamp':<20s} {'Agent':<20s} {'Benchmark':<15s} {'Model':<30s} {'Par':>3s} "
+        f"{'Timestamp':<20s} {'Experiment':<12s} {'Agent':<18s} {'Benchmark':<12s} {'Model':<25s} {'Par':>3s} "
         f"{'Session ID':<38s} {'Stat':<5s} {'Eval':<4s} "
         f"{'Total':>6s} {'Crt':>5s} {'Agt':>6s} {'TTFO':>5s} "
         f"{'LLM':>6s} {'LLM%':>5s} {'Tool':>6s} {'Tool%':>5s} {'Eval':>5s}"
@@ -405,12 +431,12 @@ def print_report(records: list[TraceRecord]) -> None:
     print(header)
     print("-" * len(header))
 
-    for r in sorted(records, key=lambda x: x.start_time):
+    for r in sorted(records, key=lambda x: (x.experiment_name, x.start_time)):
         eval_str = "pass" if r.evaluation_result is True else "fail" if r.evaluation_result is False else "?"
         llm_pct = (r.llm_after_obs_s / r.agent_call_s * 100) if r.agent_call_s > 0 else 0
         tool_pct = (r.tool_total_s / r.agent_call_s * 100) if r.agent_call_s > 0 else 0
         print(
-            f"{format_time(r.start_time):<20s} {r.agent_name:<20s} {r.benchmark_name:<15s} {r.model:<30s} {r.num_parallel:>3d} "
+            f"{format_time(r.start_time):<20s} {r.experiment_name:<12s} {r.agent_name:<18s} {r.benchmark_name:<12s} {r.model:<25s} {r.num_parallel:>3d} "
             f"{r.session_id:<38s} {r.status:<5s} {eval_str:<4s} "
             f"{r.total_latency_s:>6.1f} {r.session_creation_s:>5.1f} {r.agent_call_s:>6.1f} {r.time_to_first_obs_s:>5.1f} "
             f"{r.llm_after_obs_s:>6.1f} {llm_pct:>5.1f} {r.tool_total_s:>6.1f} {tool_pct:>5.1f} {r.evaluation_s:>5.1f}"
@@ -430,12 +456,12 @@ def print_report(records: list[TraceRecord]) -> None:
     config_groups: dict[tuple, dict[int, list[TraceRecord]]] = defaultdict(lambda: defaultdict(list))
     
     for r in records:
-        config_key = (r.agent_name, r.benchmark_name, r.model)
+        config_key = (r.experiment_name, r.agent_name, r.benchmark_name, r.model)
         config_groups[config_key][r.num_parallel].append(r)
     
     # Print a table for each configuration
     for config_key in sorted(config_groups.keys()):
-        agent, benchmark, model = config_key
+        experiment, agent, benchmark, model = config_key
         parallel_groups = config_groups[config_key]
         
         # Get all parallel values for this config
@@ -500,8 +526,10 @@ def print_report(records: list[TraceRecord]) -> None:
 
         # --- Agent metrics ---
         print(sep)
-        print_metric_row("LLM Calls (count)", lambda t: t.llm_count, ".1f")
+        print_metric_row("LLM Calls (count)", lambda t: t.llm_count_after_obs, ".1f")
+        print_metric_row("Avg LLM Call Latency (s)", lambda t: (t.llm_after_obs_s / max(t.llm_count_after_obs, 1)) if t.llm_count_after_obs > 0 else 0, ".3f")
         print_metric_row("Tool Calls (count)", lambda t: t.tool_count, ".1f")
+        print_metric_row("Avg Tool Call Latency (s)", lambda t: (t.tool_total_s / max(t.tool_count, 1)) if t.tool_count > 0 else 0, ".3f")
         print_metric_row("LLM Input Tokens", lambda t: t.llm_input_tokens, ".0f")
         print_metric_row("LLM Output Tokens", lambda t: t.llm_output_tokens, ".0f")
         print_metric_row("LLM Total Tokens", lambda t: t.llm_input_tokens + t.llm_output_tokens, ".0f")
@@ -556,15 +584,166 @@ def print_report(records: list[TraceRecord]) -> None:
         print()
 
 
+def print_experiment_comparison(records: list[TraceRecord]) -> None:
+    """Print comparison report between experiments."""
+    if not records:
+        print("No traces to compare.")
+        return
+    
+    # Get unique experiments
+    experiments = sorted(set(r.experiment_name for r in records))
+    
+    if len(experiments) < 2:
+        print(f"Only one experiment found: {experiments[0] if experiments else 'none'}")
+        print("Need at least 2 experiments to compare.")
+        return
+    
+    print()
+    print("=" * 140)
+    print(f"Experiment Comparison: {' vs '.join(experiments)}")
+    print("=" * 140)
+    print()
+    
+    # Group by (agent, benchmark, model) and then by experiment
+    config_groups: dict[tuple, dict[str, list[TraceRecord]]] = defaultdict(lambda: defaultdict(list))
+    
+    for r in records:
+        config_key = (r.agent_name, r.benchmark_name, r.model, r.num_parallel)
+        config_groups[config_key][r.experiment_name].append(r)
+    
+    # Print a table for each configuration
+    for config_key in sorted(config_groups.keys()):
+        agent, benchmark, model, num_parallel = config_key
+        exp_groups = config_groups[config_key]
+        
+        # Only show configs that have data for multiple experiments
+        if len(exp_groups) < 2:
+            continue
+        
+        print(f"\nAgent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}  |  Parallel: {num_parallel}")
+        print("-" * 140)
+        
+        # Check if any traces have infra data
+        has_infra = any(t.has_infra for traces in exp_groups.values() for t in traces)
+        
+        # Build header
+        header = f"{'Metric':<35s}"
+        for exp in experiments:
+            if exp in exp_groups:
+                header += f" | {exp:>12s}"
+        print(header)
+        print("-" * len(header))
+        
+        # Helper to print a metric row
+        def print_metric_row(label: str, metric_fn, fmt: str = ".2f") -> None:
+            row = f"{label:<35s}"
+            for exp in experiments:
+                if exp in exp_groups:
+                    traces = exp_groups[exp]
+                    values = [metric_fn(t) for t in traces]
+                    avg_val = avg(values)
+                    row += f" | {avg_val:>12{fmt}}"
+                else:
+                    row += f" | {'N/A':>12s}"
+            print(row)
+        
+        # Count row
+        count_row = f"{'Traces (count)':<35s}"
+        for exp in experiments:
+            if exp in exp_groups:
+                count_row += f" | {len(exp_groups[exp]):>12d}"
+            else:
+                count_row += f" | {'N/A':>12s}"
+        print(count_row)
+        
+        # Evaluation success rate
+        eval_row = f"{'Eval Success Rate (%)':<35s}"
+        for exp in experiments:
+            if exp in exp_groups:
+                traces = exp_groups[exp]
+                eval_success = sum(1 for t in traces if t.evaluation_result is True)
+                rate = (eval_success / len(traces) * 100) if traces else 0
+                eval_row += f" | {rate:>12.1f}"
+            else:
+                eval_row += f" | {'N/A':>12s}"
+        print(eval_row)
+
+        # --- Timing (absolute) ---
+        print_metric_row("Total Latency (s)", lambda t: t.total_latency_s)
+        print_metric_row("Session Creation (s)", lambda t: t.session_creation_s)
+        print_metric_row("Agent Call (s)", lambda t: t.agent_call_s)
+        print_metric_row("  Time to First Obs (s)", lambda t: t.time_to_first_obs_s)
+        print_metric_row("  LLM Calls (s)", lambda t: t.llm_after_obs_s)
+        print_metric_row("  Tool Calls (s)", lambda t: t.tool_total_s)
+        print_metric_row("  Overhead (s)", lambda t: t.overhead_s)
+        print_metric_row("Evaluation (s)", lambda t: t.evaluation_s)
+
+        # --- Timing (% of agent call) ---
+        sep = f"{'':35s}"
+        for exp in experiments:
+            if exp in exp_groups:
+                sep += f" | {'':>12s}"
+        print(sep)
+        print_metric_row("% Time before 1st Obs",
+                         lambda t: (t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+        print_metric_row("% Time on LLM calls",
+                         lambda t: (t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+        print_metric_row("% Time on Tool calls",
+                         lambda t: (t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+        print_metric_row("% Time overhead",
+                         lambda t: (t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+
+        # --- Agent metrics ---
+        print(sep)
+        print_metric_row("LLM Calls (count)", lambda t: t.llm_count_after_obs, ".1f")
+        print_metric_row("Avg LLM Call Latency (s)", lambda t: (t.llm_after_obs_s / max(t.llm_count_after_obs, 1)) if t.llm_count_after_obs > 0 else 0, ".3f")
+        print_metric_row("Tool Calls (count)", lambda t: t.tool_count, ".1f")
+        print_metric_row("Avg Tool Call Latency (s)", lambda t: (t.tool_total_s / max(t.tool_count, 1)) if t.tool_count > 0 else 0, ".3f")
+        print_metric_row("LLM Input Tokens", lambda t: t.llm_input_tokens, ".0f")
+        print_metric_row("LLM Output Tokens", lambda t: t.llm_output_tokens, ".0f")
+        print_metric_row("LLM Total Tokens", lambda t: t.llm_input_tokens + t.llm_output_tokens, ".0f")
+        
+        # --- Infrastructure metrics (if available) ---
+        if has_infra:
+            print(sep)
+            print_metric_row("MCP CPU Utilization (%)", lambda t: t.mcp_cpu_utilization_pct if t.has_infra else 0, ".1f")
+            print_metric_row("MCP CPU Throttle (%)", lambda t: t.mcp_throttle_pct if t.has_infra else 0, ".1f")
+            print_metric_row("MCP Memory Max (MB)", lambda t: t.mcp_memory_max_mb if t.has_infra else 0, ".0f")
+            print_metric_row("MCP Memory Utilization (%)", lambda t: t.mcp_memory_utilization_pct if t.has_infra else 0, ".1f")
+            print_metric_row("MCP Network RX (MB)", lambda t: t.mcp_network_rx_mb if t.has_infra else 0, ".3f")
+            print_metric_row("MCP Network TX (MB)", lambda t: t.mcp_network_tx_mb if t.has_infra else 0, ".3f")
+            
+            print_metric_row("A2A CPU Utilization (%)", lambda t: t.a2a_cpu_utilization_pct if t.has_infra else 0, ".1f")
+            print_metric_row("A2A CPU Throttle (%)", lambda t: t.a2a_throttle_pct if t.has_infra else 0, ".1f")
+            print_metric_row("A2A Memory Max (MB)", lambda t: t.a2a_memory_max_mb if t.has_infra else 0, ".0f")
+            print_metric_row("A2A Memory Utilization (%)", lambda t: t.a2a_memory_utilization_pct if t.has_infra else 0, ".1f")
+            print_metric_row("A2A Network RX (MB)", lambda t: t.a2a_network_rx_mb if t.has_infra else 0, ".3f")
+            print_metric_row("A2A Network TX (MB)", lambda t: t.a2a_network_tx_mb if t.has_infra else 0, ".3f")
+    
+    print()
+
+
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] != "-":
-        with open(sys.argv[1]) as f:
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Analyze Phoenix agent traces")
+    parser.add_argument("file", nargs="?", help="JSON file to read (default: stdin)")
+    parser.add_argument("--compare", action="store_true", help="Enable comparison mode (currently unused, for future enhancements)")
+    args = parser.parse_args()
+    
+    if args.file and args.file != "-":
+        with open(args.file) as f:
             raw = json.load(f)
     else:
         raw = json.load(sys.stdin)
 
     records = parse_traces(raw)
-    print_report(records)
+    
+    if args.compare:
+        print_experiment_comparison(records)
+    else:
+        print_report(records)
+    
     return 0
 
 
