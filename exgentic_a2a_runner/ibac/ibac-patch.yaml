@@ -1,0 +1,33 @@
+# IBAC plugin-pipeline patch fragment.
+#
+# Not a Kubernetes manifest. apply-ibac.sh merges these additions into
+# the operator-rendered authbridge ConfigMap (`authbridge-config-<agent>`)
+# via ibac-merge.py, then waits for the sidecar's hot-reload to swap
+# pipelines.
+#
+# Pipeline shape after merge:
+#   inbound:  a2a-parser, jwt-validation
+#   outbound: token-exchange, inference-parser, mcp-parser, ibac
+#
+# a2a-parser must run before jwt-validation so pctx.Session.LastIntent()
+# is populated even when jwt-validation rejects. ibac runs after
+# token-exchange and the parsers so it sees the bearer-token-decorated
+# request and any MCP / inference enrichment on pctx.Extensions.
+#
+# ${VAR} placeholders are expanded by apply-ibac.sh (envsubst) before
+# the merge runs. system_prompt is injected by ibac-merge.py from
+# intent_prompt.txt and intentionally NOT listed here.
+
+inbound_prepend:
+  - name: a2a-parser
+
+outbound_append:
+  - name: inference-parser
+  - name: mcp-parser
+  - name: ibac
+    config:
+      judge_endpoint: "${IBAC_JUDGE_ENDPOINT}"
+      judge_model: "${IBAC_JUDGE_MODEL}"
+      timeout_ms: ${IBAC_TIMEOUT_MS}
+      judge_inference: false
+      agent_llm_host: "${IBAC_AGENT_LLM_HOST}"

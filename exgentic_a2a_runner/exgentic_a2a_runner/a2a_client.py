@@ -90,8 +90,9 @@ class A2AProxyClient:
         else:
             token = None
 
-        # x-session-id lets the IBAC sidecar (if present) key intent per prompt.
-        # Harmless when IBAC isn't deployed; the agent ignores unknown headers.
+        # x-session-id is a per-prompt correlation id. The current IBAC plugin
+        # keys intent off authbridge's own session store (populated by a2a-parser),
+        # not this header — but emitting it is harmless and useful for tracing.
         session_id = uuid.uuid4().hex
         httpx_client = httpx.AsyncClient(
             timeout=timeout_s,

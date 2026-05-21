@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
             echo "  --phoenix-otel             Port-forward Phoenix OTLP during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
-            echo "  --ibac                     Inject the IBAC sidecar into the agent pod"
+            echo "  --ibac                     Enable IBAC by patching the authbridge sidecar's plugin pipeline"
             echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
             echo ""

@@ -69,10 +69,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "IBAC Environment Variables (used with --ibac):"
             echo "  IBAC_ENABLED                 Default for --ibac flag if set to true"
-            echo "  IBAC_SIDECAR_IMAGE           Sidecar image (default: localhost/ibac-sidecar:latest)"
-            echo "  IBAC_ENVOY_IMAGE             Envoy image (default: envoyproxy/envoy:v1.28-latest)"
-            echo "  IBAC_OLLAMA_URL              Validator LLM (default: http://host.docker.internal:11434)"
-            echo "  IBAC_TRUSTED_DESTINATIONS    Comma-separated host[:port] bypass list (auto-derived if unset)"
+            echo "  IBAC_JUDGE_ENDPOINT          Judge LLM base URL (default: http://host.docker.internal:11434)"
+            echo "  IBAC_JUDGE_MODEL             Judge model id (default: llama3.2:3b)"
+            echo "  IBAC_AGENT_LLM_HOST          Hostname of the agent's own LLM (auto-derived from OPENAI_API_BASE)"
+            echo "  IBAC_TIMEOUT_MS              Per-judge-call timeout in ms (default: 15000)"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark gsm8k --agent generic_agent"
@@ -460,6 +460,14 @@ echo ""
 # Step 8: Deploy agent via Kagenti API
 echo "Step 8: Deploying agent via Kagenti API..."
 
+# IBAC patches the operator-injected authbridge sidecar's plugin pipeline, so the
+# operator must inject one in the first place. Without authBridgeEnabled, no
+# authbridge-config-<agent> ConfigMap is created and apply-ibac.sh has nothing to patch.
+AUTHBRIDGE_ENABLED="false"
+if [ "$USE_IBAC" = "true" ]; then
+    AUTHBRIDGE_ENABLED="true"
+fi
+
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     # Deploy generic agent from source
     AGENT_JSON=$(cat <<EOF
@@ -484,7 +492,7 @@ if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     }
   ],
   "createHttpRoute": false,
-  "authBridgeEnabled": false,
+  "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
 EOF
@@ -514,7 +522,7 @@ else
     }
   ],
   "createHttpRoute": false,
-  "authBridgeEnabled": false,
+  "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
 EOF
@@ -674,12 +682,12 @@ if [ "$USE_IBAC" = "true" ]; then
         echo "Error: $SCRIPT_DIR/ibac/apply-ibac.sh not found or not executable"
         exit 1
     fi
-    AGENT_NAME="$AGENT_NAME" NAMESPACE="$NAMESPACE" TOOL_NAME="$TOOL_NAME" \
+    AGENT_NAME="$AGENT_NAME" NAMESPACE="$NAMESPACE" \
         OPENAI_API_BASE="${OPENAI_API_BASE:-}" \
-        IBAC_SIDECAR_IMAGE="${IBAC_SIDECAR_IMAGE:-}" \
-        IBAC_ENVOY_IMAGE="${IBAC_ENVOY_IMAGE:-}" \
-        IBAC_OLLAMA_URL="${IBAC_OLLAMA_URL:-}" \
-        IBAC_TRUSTED_DESTINATIONS="${IBAC_TRUSTED_DESTINATIONS:-}" \
+        IBAC_JUDGE_ENDPOINT="${IBAC_JUDGE_ENDPOINT:-}" \
+        IBAC_JUDGE_MODEL="${IBAC_JUDGE_MODEL:-}" \
+        IBAC_AGENT_LLM_HOST="${IBAC_AGENT_LLM_HOST:-}" \
+        IBAC_TIMEOUT_MS="${IBAC_TIMEOUT_MS:-}" \
         "$SCRIPT_DIR/ibac/apply-ibac.sh"
     echo ""
 fi
