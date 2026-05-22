@@ -481,9 +481,12 @@ if [ "$AGENT_NAME_INPUT" = "tool_calling" ]; then
     ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_SET_AGENT_ENABLE_TOOL_SHORTLISTING\", \"value\": \"true\"}]")
 fi
 
-# Add EXGENTIC_OTEL_ENABLED and OTEL_EXPORTER_OTLP_PROTOCOL to environment variables
-echo "Adding EXGENTIC_OTEL_ENABLED and OTEL_EXPORTER_OTLP_PROTOCOL to environment variables"
-ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
+# Add EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, and OTEL_EXPORTER_OTLP_PROTOCOL.
+# The kagenti-deps otel-collector binds OTLP/HTTP on 8335 (and gRPC on 4317);
+# nothing is listening on 4318, so requests there return 503 and crash the
+# agent's strict OTEL startup probe.
+echo "Adding EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL"
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://otel-collector.kagenti-system.svc.cluster.local:8335\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
 
 # Set agent runner to thread for in-process execution (avoids venv subprocess overhead)
 echo "Adding EXGENTIC_DEFAULT_RUNNER=thread for agent"
