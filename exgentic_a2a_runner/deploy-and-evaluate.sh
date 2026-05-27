@@ -24,6 +24,7 @@ KEYCLOAK_PASSWORD="unknown"
 MLFLOW_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_IBAC="${IBAC_ENABLED:-false}"
+USE_AUTHBRIDGE="${AUTHBRIDGE_ENABLED:-false}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -60,6 +61,14 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --authbridge)
+            USE_AUTHBRIDGE="true"
+            shift
+            ;;
+        --no-authbridge)
+            USE_AUTHBRIDGE="false"
+            shift
+            ;;
         --ibac)
             USE_IBAC="true"
             shift
@@ -82,7 +91,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
             echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
-            echo "  --ibac                     Enable IBAC by patching the authbridge sidecar's plugin pipeline"
+            echo "  --authbridge               Enable authbridge sidecar (without IBAC plugin)"
+            echo "  --no-authbridge            Disable authbridge sidecar (default; overrides AUTHBRIDGE_ENABLED env)"
+            echo "  --ibac                     Enable IBAC (implies --authbridge)"
             echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
             echo ""
@@ -101,6 +112,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Environment Variables:"
             echo "  USE_MCP_GATEWAY=true       Same as --use-mcp-gateway (set in .env)"
+            echo "  AUTHBRIDGE_ENABLED=true    Same as --authbridge (set in .env)"
             echo "  IBAC_ENABLED=true          Same as --ibac (set in .env)"
             exit 0
             ;;
@@ -139,6 +151,7 @@ echo "Model: $MODEL_NAME"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
 echo "MLflow tracing: $MLFLOW_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
+echo "AuthBridge: $USE_AUTHBRIDGE"
 echo "IBAC: $USE_IBAC"
 echo ""
 
@@ -146,6 +159,12 @@ echo ""
 MCP_GATEWAY_FLAG=""
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_GATEWAY_FLAG="--use-mcp-gateway"
+fi
+
+# Build authbridge flag for deploy-agent.sh
+AUTHBRIDGE_FLAG="--no-authbridge"
+if [ "$USE_AUTHBRIDGE" = "true" ]; then
+    AUTHBRIDGE_FLAG="--authbridge"
 fi
 
 # Build IBAC flag for deploy-agent.sh (explicit --ibac/--no-ibac so CLI always wins over agent script's own IBAC_ENABLED read)
@@ -182,6 +201,7 @@ echo "=========================================="
     --keycloak-user "$KEYCLOAK_USERNAME" \
     --keycloak-pass "$KEYCLOAK_PASSWORD" \
     $MCP_GATEWAY_FLAG \
+    $AUTHBRIDGE_FLAG \
     $IBAC_FLAG
 
 if [ $? -ne 0 ]; then

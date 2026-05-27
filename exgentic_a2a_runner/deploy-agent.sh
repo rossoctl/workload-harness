@@ -15,6 +15,8 @@ AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
 # IBAC_ENABLED lets .env pre-set the default; --ibac / --no-ibac always override.
 USE_IBAC="${IBAC_ENABLED:-false}"
+# AUTHBRIDGE can be enabled independently of IBAC; --ibac implies --authbridge.
+USE_AUTHBRIDGE="${AUTHBRIDGE_ENABLED:-false}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --authbridge)
+            USE_AUTHBRIDGE="true"
+            shift
+            ;;
+        --no-authbridge)
+            USE_AUTHBRIDGE="false"
+            shift
+            ;;
         --ibac)
             USE_IBAC="true"
             shift
@@ -63,9 +73,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
-            echo "  --ibac                     Enable IBAC by patching the authbridge sidecar's plugin pipeline"
+            echo "  --authbridge               Enable authbridge sidecar (without IBAC plugin)"
+            echo "  --no-authbridge            Disable authbridge sidecar (default; overrides AUTHBRIDGE_ENABLED env)"
+            echo "  --ibac                     Enable IBAC (implies --authbridge)"
             echo "  --no-ibac                  Deploy without IBAC (default; overrides IBAC_ENABLED env)"
             echo "  -h, --help                 Show this help message"
+            echo ""
+            echo "Environment Variables:"
+            echo "  AUTHBRIDGE_ENABLED           Default for --authbridge flag if set to true"
             echo ""
             echo "IBAC Environment Variables (used with --ibac):"
             echo "  IBAC_ENABLED                 Default for --ibac flag if set to true"
@@ -498,12 +513,12 @@ echo ""
 # Step 8: Deploy agent via Kagenti API
 echo "Step 8: Deploying agent via Kagenti API..."
 
-# IBAC patches the operator-injected authbridge sidecar's plugin pipeline, so the
-# operator must inject one in the first place. Without authBridgeEnabled, no
-# authbridge-config-<agent> ConfigMap is created and apply-ibac.sh has nothing to patch.
-AUTHBRIDGE_ENABLED="false"
-if [ "$USE_IBAC" = "true" ]; then
+# authbridge sidecar is required by IBAC (it patches the plugin pipeline), but can
+# also be enabled standalone for auth/routing without the IBAC plugin.
+if [ "$USE_IBAC" = "true" ] || [ "$USE_AUTHBRIDGE" = "true" ]; then
     AUTHBRIDGE_ENABLED="true"
+else
+    AUTHBRIDGE_ENABLED="false"
 fi
 
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -808,6 +823,7 @@ echo "  Tool: $TOOL_NAME.$NAMESPACE:8000"
 echo "  Model: $MODEL_NAME"
 echo "  CPU Limit: 4 cores"
 echo "  Memory Limit: 3Gi"
+echo "  AuthBridge: $AUTHBRIDGE_ENABLED"
 echo "  IBAC: $USE_IBAC"
 if [ -n "$OPENAI_API_BASE" ]; then
     echo "  LLM_API_BASE: $OPENAI_API_BASE"
