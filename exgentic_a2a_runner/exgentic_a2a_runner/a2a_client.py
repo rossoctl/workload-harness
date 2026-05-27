@@ -95,10 +95,10 @@ class A2AProxyClient:
         # x-session-id is a per-prompt correlation id. The current IBAC plugin
         # keys intent off authbridge's own session store (populated by a2a-parser),
         # not this header — but emitting it is harmless and useful for tracing.
-        session_id = uuid.uuid4().hex
+        x_session_id = uuid.uuid4().hex
         httpx_client = httpx.AsyncClient(
             timeout=timeout_s,
-            headers={"x-session-id": session_id},
+            headers={"x-session-id": x_session_id},
         )
         if self.otel_enabled:
             try:
