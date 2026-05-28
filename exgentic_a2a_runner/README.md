@@ -36,6 +36,110 @@ The runner follows this execution model for each benchmark session:
   - Keycloak in `keycloak` namespace
   - `team1` namespace for deployments
 
+### Pipeline composition
+
+The deploy scripts compose the AuthBridge plugin pipeline by selecting
+named plugins. The sidecar is injected by the operator only when at
+least one selector is supplied — omit them all for a sidecar-free
+deployment. See [`AUTHBRIDGE_PIPELINE_SPEC.md`](AUTHBRIDGE_PIPELINE_SPEC.md)
+for the full design.
+
+#### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--plugin-preset NAME` | Named bundle. Available: `auth-only`, `ibac-only`, `full`. |
+| `--plugin NAME[:POLICY]` | Enable plugin with policy ∈ {`enforce`(default), `observe`, `off`}. Repeatable. |
+| `--no-plugin NAME` | Shorthand for `--plugin NAME:off`. Repeatable. |
+| `--plugin-config-file PATH` | Flat-map YAML overlay merged after selectors. |
+
+Selector resolution: preset seeds the set; `--plugin` / `--no-plugin`
+apply in order with last-write-wins semantics. Plugins not in the
+final set are emitted with `on_error: off` so the framework skips
+dispatch for them (this is required because the operator base config
+enables every plugin by default).
+
+#### Presets
+
+| Preset | Inbound | Outbound |
+|--------|---------|----------|
+| `auth-only` | `jwt-validation` | `token-exchange` |
+| `ibac-only` | `a2a-parser` | `inference-parser`, `mcp-parser`, `ibac` |
+| `full` | `a2a-parser`, `jwt-validation` | `token-exchange`, `inference-parser`, `mcp-parser`, `ibac` |
+
+#### `on_error` policy (canary rollout)
+
+Each plugin can run in `enforce`, `observe`, or `off`. `observe` collects
+shadow telemetry without blocking — useful for canarying IBAC before
+flipping to enforce:
+
+```bash
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset full \
+    --plugin ibac:observe
+```
+
+#### `--plugin-config-file` format
+
+A flat YAML map keyed by plugin name; values are deep-merged into each
+plugin's `config:` block on top of the fragment defaults:
+
+```yaml
+ibac:
+  judge_model: "llama3.2:8b"
+  timeout_ms: 30000
+token-exchange:
+  default_policy: exchange
+jwt-validation:
+  bypass_paths:
+    - /healthz
+    - /metrics
+```
+
+Unknown plugin names in the file are ignored with a WARN to stderr.
+
+#### Sidecar image compatibility
+
+Every plugin you select must be compiled into the running sidecar binary.
+The merge will validate the YAML shape, but the sidecar will fail at
+Configure with `unknown plugin "<name>"` after reload if a plugin isn't
+registered:
+
+```
+reloader: reload failed  error="build: outbound: unknown plugin \"<name>\""
+```
+
+The IBAC plugin landed in `kagenti-extensions` on 2026-05-17 (PR #421);
+use sidecar image **`v0.6.0-alpha.4`** or newer when selecting `ibac`.
+The image tag is pinned in `kagenti/charts/kagenti/values.yaml`. To
+verify what's running:
+
+```bash
+kubectl -n team1 get pod -l app.kubernetes.io/name=<agent-name> \
+  -o jsonpath='{range .items[0].spec.containers[?(@.name=="authbridge")]}{.image}{"\n"}{end}'
+```
+
+> **Compatibility note.** Newer chart versions tie sidecar image
+> versions to operator versions (per-plugin config support,
+> jwt-validation field shape). When bumping the sidecar image past
+> `v0.5.0-rc.3`, confirm your kagenti-operator is recent enough —
+> older operators may emit ConfigMaps the newer sidecar can't parse.
+
+#### Troubleshooting
+
+- **`unknown plugin "<name>"`** at reload: the sidecar binary doesn't
+  have that plugin compiled in. Bump the image tag.
+- **Mutex error: `token-exchange` and `token-broker`**: both claim
+  `ClaimAuthorizationHeader`; the script rejects this before any
+  kubectl call. Disable one with `--no-plugin`.
+- **`Reads ... no earlier plugin writes it`**: parser ordering issue;
+  shouldn't happen with the canonical-position table, but possible if a
+  malformed `--plugin-config-file` introduces an unknown plugin. See
+  [`framework-architecture.md` §6](https://github.com/kagenti/kagenti-extensions/blob/main/AuthBridge/docs/framework-architecture.md)
+  for the underlying rules.
+- **Unknown plugin / preset name**: script-side error; valid names are
+  listed in the spec §3.1, valid presets in §3.2.
+
 ### Install from source
 
 #### Deploy a kagenti cluster

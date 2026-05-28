@@ -1,0 +1,7 @@
+# a2a-parser plugin fragment (inbound).
+#
+# Populates pctx.Session.LastIntent() so downstream plugins (notably
+# IBAC on the outbound chain) can read the user's intent. Must run
+# before jwt-validation on the inbound chain so intent capture happens
+# even when validation rejects.
+name: a2a-parser

@@ -1,0 +1,8 @@
+# jwt-validation plugin fragment.
+#
+# The operator base config supplies issuer/keycloak_url/keycloak_realm.
+# This fragment exists so the merge can keep the plugin in the resolved
+# selection (or flip its on_error policy) without re-rendering the
+# operator's heavy config block. Per-plugin overrides may be supplied
+# via --plugin-config-file (see AUTHBRIDGE_PIPELINE_SPEC.md §4.5).
+name: jwt-validation
