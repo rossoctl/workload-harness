@@ -52,7 +52,8 @@ if [ -z "${IBAC_AGENT_LLM_HOST:-}" ]; then
         IBAC_AGENT_LLM_HOST="host.docker.internal"
     fi
 fi
-export IBAC_JUDGE_ENDPOINT IBAC_JUDGE_MODEL IBAC_AGENT_LLM_HOST IBAC_TIMEOUT_MS
+JUDGE_BEARER="${JUDGE_BEARER:-${OPENAI_API_KEY:-}}"
+export IBAC_JUDGE_ENDPOINT IBAC_JUDGE_MODEL IBAC_AGENT_LLM_HOST IBAC_TIMEOUT_MS JUDGE_BEARER
 
 # --- token-broker defaults (consumed only when token-broker is selected).
 TOKEN_BROKER_URL="${TOKEN_BROKER_URL:-}"

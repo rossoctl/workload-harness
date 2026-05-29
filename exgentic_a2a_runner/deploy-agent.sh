@@ -6,6 +6,33 @@
 
 set -e
 
+# Auto-load .env from the script's directory so values like
+# IBAC_JUDGE_ENDPOINT / IBAC_JUDGE_MODEL flow through to apply-pipeline.sh
+# without the caller having to `source .env` first. Existing shell exports
+# take precedence — only unset vars are populated from .env.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip blanks and comments
+        [[ -z "${line// }" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Strip optional leading "export "
+        line="${line#export }"
+        # Must look like KEY=VALUE
+        [[ "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        # Strip surrounding single or double quotes from the value
+        if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        fi
+        # Only set if not already in the environment (shell wins over .env)
+        if [ -z "${!key+x}" ]; then
+            export "$key=$val"
+        fi
+    done <"$ENV_FILE"
+fi
+
 # Default values
 MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
@@ -505,16 +532,23 @@ if [ "$AGENT_NAME_INPUT" = "tool_calling" ]; then
     ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_SET_AGENT_ENABLE_TOOL_SHORTLISTING\", \"value\": \"true\"}]")
 fi
 
-# Add EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, and OTEL_EXPORTER_OTLP_PROTOCOL.
-# The kagenti-deps otel-collector binds OTLP/HTTP on 8335 (and gRPC on 4317);
-# nothing is listening on 4318, so requests there return 503 and crash the
-# agent's strict OTEL startup probe.
+# The kagenti-deps otel-collector listens for OTLP/HTTP on 8335 (and gRPC on
+# 4317). The receivers ConfigMap shows 4318, but the running collector startup
+# logs ("Starting HTTP server endpoint: 0.0.0.0:8335") confirm 8335 is what's
+# actually bound. Working sibling pods (e.g. tau2) also export to 8335.
 echo "Adding EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL"
 ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://otel-collector.kagenti-system.svc.cluster.local:8335\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
 
 # Set agent runner to thread for in-process execution (avoids venv subprocess overhead)
 echo "Adding EXGENTIC_DEFAULT_RUNNER=thread for agent"
 ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_DEFAULT_RUNNER\", \"value\": \"thread\"}]")
+
+# Force litellm to use its bundled model-pricing JSON instead of fetching
+# https://raw.githubusercontent.com/BerriAI/litellm/.../model_prices_and_context_window.json
+# at startup. The remote fetch happens before any inbound request, so IBAC
+# rejects it with `ibac.no_session` / `ibac.no_intent`.
+echo "Adding LITELLM_LOCAL_MODEL_COST_MAP=True"
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"LITELLM_LOCAL_MODEL_COST_MAP\", \"value\": \"True\"}]")
 
 echo "✓ Environment variables prepared for deployment"
 echo ""
@@ -843,6 +877,8 @@ if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
         IBAC_JUDGE_MODEL="${IBAC_JUDGE_MODEL:-}" \
         IBAC_AGENT_LLM_HOST="${IBAC_AGENT_LLM_HOST:-}" \
         IBAC_TIMEOUT_MS="${IBAC_TIMEOUT_MS:-}" \
+        JUDGE_BEARER="${JUDGE_BEARER:-}" \
+        OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
         TOKEN_BROKER_URL="${TOKEN_BROKER_URL:-}" \
         TOKEN_BROKER_AUDIENCE="${TOKEN_BROKER_AUDIENCE:-}" \
         "$SCRIPT_DIR/authbridge/apply-pipeline.sh"

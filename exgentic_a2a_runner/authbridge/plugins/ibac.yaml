@@ -10,3 +10,4 @@ config:
   timeout_ms: ${IBAC_TIMEOUT_MS}
   judge_inference: false
   agent_llm_host: "${IBAC_AGENT_LLM_HOST}"
+  judge_bearer: "${JUDGE_BEARER}"
