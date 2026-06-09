@@ -67,6 +67,34 @@ The runner follows this execution model for each benchmark session:
 4. **Close Session**: `mcp_server.close_session(session_id)`
 5. **Record Statistics**: Track completion time, success rate, compute costs, tokens.
 
+## Benchmarks
+
+The runner currently drives three benchmarks via the Exgentic MCP server. Each is a separate MCP image (`./build.sh <name>` from `agent-examples/mcp/exgentic_benchmarks`) and is selected at deploy time with `--benchmark <name>`.
+
+| Benchmark | What it tests | Tool surface | Notes |
+|-----------|---------------|--------------|-------|
+| `gsm8k` | Grade-school math word problems — single-turn arithmetic reasoning. | Minimal — primarily LLM reasoning, light tool use. | Cheap and fast; good smoke test. The deploy script sets `EXGENTIC_SET_BENCHMARK_RUNNER=direct` for this benchmark. |
+| `tau2` | Multi-turn customer-support conversations against a simulated user. Measures whether the agent can complete realistic task flows over several turns. | Domain tools (retail, airline, telecom) plus a user-simulator LLM. | Deploy passes `EXGENTIC_SET_BENCHMARK_USER_SIMULATOR_MODEL` so the simulator runs on the same model as the agent. The IBAC plugin also lands its canonical attack-shape tests against tau-style multi-turn traffic — see [`ibac-benchmarking.md`](ibac-benchmarking.md). |
+| `appworld` | Long-horizon, tool-heavy tasks across a simulated app ecosystem (calendar, email, contacts, etc.). Stresses tool selection and planning. | Very wide — hundreds of tools across the simulated apps. | OpenAI models can't handle this tool surface without shortlisting; use `gemini-2.5-pro` or another model with strong tool selection. |
+
+### Picking a model
+
+The model name passed via `--model` (or `LLM_MODEL` / `EXGENTIC_SET_AGENT_MODEL`) is consumed by [LiteLLM](https://docs.litellm.ai/) on the agent side, so it follows LiteLLM's `<provider>/<model>` routing convention. The default is `Azure/gpt-4.1`.
+
+**OpenAI-compatible backends** (vLLM, Ollama, llama.cpp, LM Studio, custom proxies, etc.) — prefix the model name with `openai/` to force LiteLLM down its OpenAI-compatible route, and point `OPENAI_API_BASE` at your endpoint:
+
+```bash
+# Custom Azure deployment fronted by an OpenAI-compatible proxy
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --model openai/Azure/gpt-4o-mini
+
+# Local model served via vLLM/Ollama
+./deploy-agent.sh --benchmark gsm8k --agent tool_calling \
+    --model openai/llama3.1-70b-instruct
+```
+
+For `appworld`, use a model with strong tool-selection — e.g. `gemini-2.5-pro` — rather than an OpenAI-route model.
+
 ## Installation
 
 > **⏱️ Estimated Setup Time:** ~15 minutes (excluding container image pulls)
@@ -188,8 +216,7 @@ source .venv/bin/activate
 - `HF_TOKEN`: HuggingFace token (optional, creates hf-secret with dummy token if not set)
 - `OPENAI_API_BASE`: OpenAI API base URL (optional, added to deployment env vars)
 
-For appworld benchmark, use gemini-2.5-pro or other models, because OpenAI models cannot handle the number of tools in appworld without special tool shortlisting.
-
+For benchmark fit and model-name conventions (including the `openai/` prefix for OpenAI-compatible backends), see [Benchmarks](#benchmarks).
 
 ## MCP Gateway Support
 
