@@ -1,0 +1,6 @@
+# ibac-only preset.
+# Guardrails without inbound auth (e.g. an upstream gateway has already
+# terminated auth). Outbound IBAC still needs the parsers to populate
+# extension slots.
+inbound:  [a2a-parser]
+outbound: [inference-parser, mcp-parser, ibac]

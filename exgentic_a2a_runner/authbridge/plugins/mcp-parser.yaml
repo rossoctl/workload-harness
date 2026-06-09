@@ -1,0 +1,7 @@
+# mcp-parser plugin fragment (outbound).
+#
+# Observe-only parser that populates pctx.Extensions with parsed MCP
+# tool-call info. Must run after the outbound token gate so it sees
+# the bearer-decorated request, and before IBAC so the judge can read
+# the parsed extension slot.
+name: mcp-parser

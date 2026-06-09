@@ -1,0 +1,4 @@
+# auth-only preset.
+# Bare auth + token exchange. No protocol parsers, no IBAC.
+inbound:  [jwt-validation]
+outbound: [token-exchange]

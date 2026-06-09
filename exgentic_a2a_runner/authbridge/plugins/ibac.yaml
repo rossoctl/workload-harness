@@ -1,0 +1,13 @@
+# IBAC plugin fragment.
+#
+# ${VAR} placeholders are expanded by apply-pipeline.sh (envsubst) before
+# the merge runs. system_prompt is injected by pipeline-merge.py from
+# intent_prompt.txt and intentionally NOT listed here.
+name: ibac
+config:
+  judge_endpoint: "${IBAC_JUDGE_ENDPOINT}"
+  judge_model: "${IBAC_JUDGE_MODEL}"
+  timeout_ms: ${IBAC_TIMEOUT_MS}
+  judge_inference: false
+  agent_llm_host: "${IBAC_AGENT_LLM_HOST}"
+  judge_bearer: "${JUDGE_BEARER}"

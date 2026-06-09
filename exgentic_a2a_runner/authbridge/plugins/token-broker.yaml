@@ -1,0 +1,9 @@
+# token-broker plugin fragment.
+#
+# Mutually exclusive with token-exchange (both claim
+# ClaimAuthorizationHeader). pipeline-merge.py rejects enabling both.
+# ${VAR} placeholders are expanded by apply-pipeline.sh (envsubst).
+name: token-broker
+config:
+  broker_url: "${TOKEN_BROKER_URL}"
+  audience: "${TOKEN_BROKER_AUDIENCE}"

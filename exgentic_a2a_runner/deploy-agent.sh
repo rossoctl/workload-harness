@@ -6,6 +6,33 @@
 
 set -e
 
+# Auto-load .env from the script's directory so values like
+# IBAC_JUDGE_ENDPOINT / IBAC_JUDGE_MODEL flow through to apply-pipeline.sh
+# without the caller having to `source .env` first. Existing shell exports
+# take precedence — only unset vars are populated from .env.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip blanks and comments
+        [[ -z "${line// }" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Strip optional leading "export "
+        line="${line#export }"
+        # Must look like KEY=VALUE
+        [[ "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        val="${line#*=}"
+        # Strip surrounding single or double quotes from the value
+        if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        fi
+        # Only set if not already in the environment (shell wins over .env)
+        if [ -z "${!key+x}" ]; then
+            export "$key=$val"
+        fi
+    done <"$ENV_FILE"
+fi
+
 # Default values
 MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
@@ -13,6 +40,14 @@ KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
+
+# AuthBridge plugin pipeline composition. See AUTHBRIDGE_PIPELINE_SPEC.md.
+# PIPELINE_PRESET is set by --plugin-preset; PIPELINE_SELECTORS accumulates
+# --plugin / --no-plugin args in order. PIPELINE_OVERLAY_FILE is set by
+# --plugin-config-file. The sidecar is injected when ANY of these are set.
+PIPELINE_PRESET=""
+PIPELINE_SELECTORS=()
+PIPELINE_OVERLAY_FILE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -41,6 +76,22 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --plugin)
+            PIPELINE_SELECTORS+=("+$2")
+            shift 2
+            ;;
+        --no-plugin)
+            PIPELINE_SELECTORS+=("-$2")
+            shift 2
+            ;;
+        --plugin-preset)
+            PIPELINE_PRESET="$2"
+            shift 2
+            ;;
+        --plugin-config-file)
+            PIPELINE_OVERLAY_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -53,13 +104,32 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
+            echo ""
+            echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
+            echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
+            echo "  --plugin NAME[:POLICY]     Enable plugin; POLICY ∈ {enforce(default), observe, off}; repeatable"
+            echo "  --no-plugin NAME           Shorthand for --plugin NAME:off; repeatable"
+            echo "  --plugin-config-file PATH  Flat-map YAML overlay merged after selectors"
             echo "  -h, --help                 Show this help message"
+            echo ""
+            echo "Plugin names: jwt-validation, token-exchange, token-broker, a2a-parser,"
+            echo "              mcp-parser, inference-parser, ibac"
+            echo ""
+            echo "Plugin tunables (consumed when the named plugin is in the active set):"
+            echo "  IBAC_JUDGE_ENDPOINT          Judge LLM base URL (default: http://host.docker.internal:11434)"
+            echo "  IBAC_JUDGE_MODEL             Judge model id (default: llama3.2:3b)"
+            echo "  IBAC_AGENT_LLM_HOST          Hostname of the agent's own LLM (auto-derived from OPENAI_API_BASE)"
+            echo "  IBAC_TIMEOUT_MS              Per-judge-call timeout in ms (default: 15000)"
+            echo "  TOKEN_BROKER_URL             Broker URL (token-broker plugin)"
+            echo "  TOKEN_BROKER_AUDIENCE        Broker audience (token-broker plugin)"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark gsm8k --agent generic_agent"
             echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini"
-            echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
+            echo "  $0 --benchmark tau2 --agent tool_calling --plugin-preset auth-only"
+            echo "  $0 --benchmark tau2 --agent tool_calling --plugin-preset full --plugin ibac:observe"
+            echo "  $0 --benchmark tau2 --agent tool_calling --plugin jwt-validation --plugin token-exchange"
             exit 0
             ;;
         -*)
@@ -462,19 +532,120 @@ if [ "$AGENT_NAME_INPUT" = "tool_calling" ]; then
     ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_SET_AGENT_ENABLE_TOOL_SHORTLISTING\", \"value\": \"true\"}]")
 fi
 
-# Add EXGENTIC_OTEL_ENABLED and OTEL_EXPORTER_OTLP_PROTOCOL to environment variables
-echo "Adding EXGENTIC_OTEL_ENABLED and OTEL_EXPORTER_OTLP_PROTOCOL to environment variables"
-ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
+# The kagenti-deps otel-collector listens for OTLP/HTTP on 8335 (and gRPC on
+# 4317). The receivers ConfigMap shows 4318, but the running collector startup
+# logs ("Starting HTTP server endpoint: 0.0.0.0:8335") confirm 8335 is what's
+# actually bound. Working sibling pods (e.g. tau2) also export to 8335.
+echo "Adding EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL"
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://otel-collector.kagenti-system.svc.cluster.local:8335\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
 
 # Set agent runner to thread for in-process execution (avoids venv subprocess overhead)
 echo "Adding EXGENTIC_DEFAULT_RUNNER=thread for agent"
 ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_DEFAULT_RUNNER\", \"value\": \"thread\"}]")
+
+# Force litellm to use its bundled model-pricing JSON instead of fetching
+# https://raw.githubusercontent.com/BerriAI/litellm/.../model_prices_and_context_window.json
+# at startup. The remote fetch happens before any inbound request, so IBAC
+# rejects it with `ibac.no_session` / `ibac.no_intent`.
+echo "Adding LITELLM_LOCAL_MODEL_COST_MAP=True"
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"LITELLM_LOCAL_MODEL_COST_MAP\", \"value\": \"True\"}]")
 
 echo "✓ Environment variables prepared for deployment"
 echo ""
 
 # Step 8: Deploy agent via Kagenti API
 echo "Step 8: Deploying agent via Kagenti API..."
+
+# Resolve the AuthBridge plugin pipeline from --plugin-preset, --plugin,
+# --no-plugin, and --plugin-config-file flags. The sidecar is injected
+# (authBridgeEnabled=true in the operator API call) when ANY of these
+# selectors are supplied. Resolution algorithm: AUTHBRIDGE_PIPELINE_SPEC.md §4.3.
+#
+# Resolution is delegated to a Python helper because macOS ships bash 3.2
+# (no associative arrays); the helper validates selectors, reads the
+# preset YAML, applies last-write-wins ordering, runs the mutex check,
+# and emits the resolved PIPELINE_PLUGINS string.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Sidecar injection trigger: any selector means inject.
+if [ -n "$PIPELINE_PRESET" ] || [ ${#PIPELINE_SELECTORS[@]} -gt 0 ] || [ -n "$PIPELINE_OVERLAY_FILE" ]; then
+    AUTHBRIDGE_ENABLED="true"
+else
+    AUTHBRIDGE_ENABLED="false"
+fi
+
+PIPELINE_PLUGINS=""
+if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
+    PIPELINE_PLUGINS=$(
+        PIPELINE_PRESET="$PIPELINE_PRESET" \
+        PRESETS_DIR="$SCRIPT_DIR/authbridge/presets" \
+        python3 - "${PIPELINE_SELECTORS[@]}" <<'PYEOF'
+import os, sys
+import yaml
+
+KNOWN = ["jwt-validation", "token-exchange", "token-broker",
+         "a2a-parser", "mcp-parser", "inference-parser", "ibac"]
+VALID = ("enforce", "observe", "off")
+CHAIN = {p: ("inbound" if p in ("a2a-parser", "jwt-validation") else "outbound")
+         for p in KNOWN}
+
+def die(msg):
+    print(f"Error: {msg}", file=sys.stderr); sys.exit(1)
+
+resolved = {}
+
+preset = os.environ.get("PIPELINE_PRESET", "")
+if preset:
+    pdir = os.environ.get("PRESETS_DIR", "")
+    pfile = os.path.join(pdir, f"{preset}.yaml")
+    if not os.path.isfile(pfile):
+        die(f"unknown preset '{preset}' (looked for {pfile}); available: auth-only, ibac-only, full")
+    with open(pfile) as f:
+        d = yaml.safe_load(f) or {}
+    for chain in ("inbound", "outbound"):
+        for name in d.get(chain, []) or []:
+            if name not in KNOWN:
+                die(f"preset {preset} references unknown plugin '{name}'")
+            resolved[name] = "enforce"
+
+for sel in sys.argv[1:]:
+    if not sel:
+        continue
+    op, rest = sel[0], sel[1:]
+    if op == "+":
+        if ":" in rest:
+            name, policy = rest.split(":", 1)
+        else:
+            name, policy = rest, "enforce"
+        if name not in KNOWN:
+            die(f"--plugin: unknown plugin '{name}'. Known: {' '.join(KNOWN)}")
+        if policy not in VALID:
+            die(f"--plugin: unknown policy '{policy}' for '{name}'. Valid: {', '.join(VALID)}")
+        resolved[name] = policy
+    elif op == "-":
+        if rest not in KNOWN:
+            die(f"--no-plugin: unknown plugin '{rest}'. Known: {' '.join(KNOWN)}")
+        resolved[rest] = "off"
+    else:
+        die(f"internal: unrecognized selector '{sel}'")
+
+# Mutex: token-exchange and token-broker on the outbound chain.
+te = resolved.get("token-exchange", "off")
+tb = resolved.get("token-broker", "off")
+if te != "off" and tb != "off":
+    die("token-exchange and token-broker are mutually exclusive "
+        "(both claim ClaimAuthorizationHeader). Disable one.")
+
+tokens = []
+for name in KNOWN:
+    policy = resolved.get(name, "off")
+    if policy == "off":
+        continue
+    tokens.append(name if policy == "enforce" else f"{name}:{policy}")
+print(" ".join(tokens))
+PYEOF
+    ) || exit 1
+fi
 
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     # Deploy generic agent from source
@@ -500,7 +671,7 @@ if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     }
   ],
   "createHttpRoute": false,
-  "authBridgeEnabled": false,
+  "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
 EOF
@@ -530,7 +701,7 @@ else
     }
   ],
   "createHttpRoute": false,
-  "authBridgeEnabled": false,
+  "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
 EOF
@@ -687,6 +858,33 @@ kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
 echo "✓ Deployment stable"
 echo ""
 
+# Step 11.4: Apply the AuthBridge plugin pipeline overlay (if any
+# plugin selector was supplied). The operator base config enables every
+# supported plugin; this overlay sets on_error: off on the ones we
+# didn't select and tunes config on the ones we did.
+if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
+    echo "Step 11.4: Applying AuthBridge pipeline overlay..."
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ ! -x "$SCRIPT_DIR/authbridge/apply-pipeline.sh" ]; then
+        echo "Error: $SCRIPT_DIR/authbridge/apply-pipeline.sh not found or not executable"
+        exit 1
+    fi
+    AGENT_NAME="$AGENT_NAME" NAMESPACE="$NAMESPACE" \
+        PIPELINE_PLUGINS="$PIPELINE_PLUGINS" \
+        PIPELINE_OVERLAY_FILE="${PIPELINE_OVERLAY_FILE:-}" \
+        OPENAI_API_BASE="${OPENAI_API_BASE:-}" \
+        IBAC_JUDGE_ENDPOINT="${IBAC_JUDGE_ENDPOINT:-}" \
+        IBAC_JUDGE_MODEL="${IBAC_JUDGE_MODEL:-}" \
+        IBAC_AGENT_LLM_HOST="${IBAC_AGENT_LLM_HOST:-}" \
+        IBAC_TIMEOUT_MS="${IBAC_TIMEOUT_MS:-}" \
+        JUDGE_BEARER="${JUDGE_BEARER:-}" \
+        OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+        TOKEN_BROKER_URL="${TOKEN_BROKER_URL:-}" \
+        TOKEN_BROKER_AUDIENCE="${TOKEN_BROKER_AUDIENCE:-}" \
+        "$SCRIPT_DIR/authbridge/apply-pipeline.sh"
+    echo ""
+fi
+
 # Step 12: Test agent card access
 echo "Step 12: Testing agent card access..."
 
@@ -760,6 +958,12 @@ echo "  Tool: $TOOL_NAME.$NAMESPACE:8000"
 echo "  Model: $MODEL_NAME"
 echo "  CPU Limit: 4 cores"
 echo "  Memory Limit: 3Gi"
+if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
+    echo "  Plugins (resolved): ${PIPELINE_PLUGINS:-<none enforced>}"
+    [ -n "$PIPELINE_OVERLAY_FILE" ] && echo "  Plugin overlay file: $PIPELINE_OVERLAY_FILE"
+else
+    echo "  AuthBridge sidecar: disabled (no plugin selectors supplied)"
+fi
 if [ -n "$OPENAI_API_BASE" ]; then
     echo "  LLM_API_BASE: $OPENAI_API_BASE"
     echo "  OPENAI_API_BASE: $OPENAI_API_BASE"

@@ -1,0 +1,4 @@
+# full preset.
+# Everything on: auth + token exchange + parsers + IBAC.
+inbound:  [a2a-parser, jwt-validation]
+outbound: [token-exchange, inference-parser, mcp-parser, ibac]

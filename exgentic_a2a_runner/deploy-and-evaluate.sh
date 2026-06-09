@@ -24,6 +24,12 @@ KEYCLOAK_PASSWORD="unknown"
 MLFLOW_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 
+# AuthBridge plugin pipeline flags forwarded to deploy-agent.sh.
+# See AUTHBRIDGE_PIPELINE_SPEC.md for the resolver semantics.
+PIPELINE_PRESET=""
+PIPELINE_SELECTORS=()
+PIPELINE_OVERLAY_FILE=""
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -59,6 +65,22 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --plugin)
+            PIPELINE_SELECTORS+=("--plugin" "$2")
+            shift 2
+            ;;
+        --no-plugin)
+            PIPELINE_SELECTORS+=("--no-plugin" "$2")
+            shift 2
+            ;;
+        --plugin-preset)
+            PIPELINE_PRESET="$2"
+            shift 2
+            ;;
+        --plugin-config-file)
+            PIPELINE_OVERLAY_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -73,6 +95,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
             echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
+            echo ""
+            echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
+            echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
+            echo "  --plugin NAME[:POLICY]     Enable plugin; POLICY ∈ {enforce(default), observe, off}; repeatable"
+            echo "  --no-plugin NAME           Shorthand for --plugin NAME:off; repeatable"
+            echo "  --plugin-config-file PATH  Flat-map YAML overlay merged after selectors"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
@@ -127,12 +155,31 @@ echo "Model: $MODEL_NAME"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
 echo "MLflow tracing: $MLFLOW_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
+if [ -n "$PIPELINE_PRESET" ] || [ ${#PIPELINE_SELECTORS[@]} -gt 0 ] || [ -n "$PIPELINE_OVERLAY_FILE" ]; then
+    echo "Plugin preset: ${PIPELINE_PRESET:-<none>}"
+    echo "Plugin selectors: ${PIPELINE_SELECTORS[*]:-<none>}"
+    [ -n "$PIPELINE_OVERLAY_FILE" ] && echo "Plugin overlay file: $PIPELINE_OVERLAY_FILE"
+else
+    echo "AuthBridge: disabled (no plugin selectors)"
+fi
 echo ""
 
 # Build gateway flag for sub-scripts
 MCP_GATEWAY_FLAG=""
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_GATEWAY_FLAG="--use-mcp-gateway"
+fi
+
+# Build the plugin-flag passthrough array for deploy-agent.sh.
+PLUGIN_FLAGS=()
+if [ -n "$PIPELINE_PRESET" ]; then
+    PLUGIN_FLAGS+=("--plugin-preset" "$PIPELINE_PRESET")
+fi
+if [ ${#PIPELINE_SELECTORS[@]} -gt 0 ]; then
+    PLUGIN_FLAGS+=("${PIPELINE_SELECTORS[@]}")
+fi
+if [ -n "$PIPELINE_OVERLAY_FILE" ]; then
+    PLUGIN_FLAGS+=("--plugin-config-file" "$PIPELINE_OVERLAY_FILE")
 fi
 
 # Step 1: Deploy benchmark
@@ -162,7 +209,8 @@ echo "=========================================="
     --model "$MODEL_NAME" \
     --keycloak-user "$KEYCLOAK_USERNAME" \
     --keycloak-pass "$KEYCLOAK_PASSWORD" \
-    $MCP_GATEWAY_FLAG
+    $MCP_GATEWAY_FLAG \
+    "${PLUGIN_FLAGS[@]}"
 
 if [ $? -ne 0 ]; then
     echo "Error: Agent deployment failed"

@@ -1,0 +1,7 @@
+# inference-parser plugin fragment (outbound).
+#
+# Observe-only parser that populates pctx.Extensions with parsed LLM
+# inference info. Must run after the outbound token gate so it sees
+# the bearer-decorated request, and before IBAC so the judge can read
+# the parsed extension slot.
+name: inference-parser

@@ -73,6 +73,8 @@ class A2AProxyClient:
 
     async def _async_send_prompt(self, prompt: str, timeout_s: float, otel_context=None, session_id: Optional[str] = None) -> str:
         """Async implementation using the standard a2a-sdk."""
+        import uuid
+
         import httpx
         from a2a.client import ClientConfig, ClientFactory, create_text_message_object
         from a2a.client.card_resolver import A2ACardResolver
@@ -90,7 +92,14 @@ class A2AProxyClient:
         else:
             token = None
 
-        httpx_client = httpx.AsyncClient(timeout=timeout_s)
+        # x-session-id is a per-prompt correlation id. The current IBAC plugin
+        # keys intent off authbridge's own session store (populated by a2a-parser),
+        # not this header — but emitting it is harmless and useful for tracing.
+        x_session_id = uuid.uuid4().hex
+        httpx_client = httpx.AsyncClient(
+            timeout=timeout_s,
+            headers={"x-session-id": x_session_id},
+        )
         if self.otel_enabled:
             try:
                 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
