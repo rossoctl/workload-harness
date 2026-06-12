@@ -20,7 +20,7 @@ The minimal end-to-end path: stand up a Kagenti cluster, build the agent + MCP i
 # 1. Stand up the Kagenti cluster (one-time)
 git clone git@github.com:kagenti/kagenti.git
 cd kagenti
-env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all
+env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all --preload-images
 cd ..
 
 # 2. Build the exgentic MCP server and agent images (one-time per benchmark/agent)
@@ -125,7 +125,7 @@ For `appworld`, use a model with strong tool-selection — e.g. `gemini-2.5-pro`
 git clone git@github.com:kagenti/kagenti.git
 cd kagenti
 
-env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all
+env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all --preload-images
 
 ```
 
@@ -328,7 +328,33 @@ benchmarking profile.
   OpenAI, vLLM, Azure, etc.).
 - The cluster's AuthBridge sidecar image must include the `ibac`
   plugin. IBAC landed in `kagenti-extensions` on 2026-05-17 (PR #421);
-  use sidecar image **`v0.6.0-alpha.4`** or newer.
+  use sidecar image **`v0.6.0-alpha.7`** or newer.
+
+  > **Caveat — not in the latest stable Kagenti release.** As of this
+  > writing, the IBAC plugin and the additive plugin-pipeline merge
+  > behavior the deploy scripts depend on are only available in
+  > `v0.6.0-alpha.7`, which has not yet been published in a stable
+  > Kagenti release. Installing from the official `v0.6.0` chart
+  > release pulls an older alpha that will fail with errors like
+  > `jwt-validation config: issuer is required` during pipeline
+  > apply. Until a release containing alpha.7 is cut, install Kagenti
+  > from `main`:
+  >
+  > ```bash
+  > git clone git@github.com:kagenti/kagenti.git
+  > cd kagenti  # use main, not a release tag
+  > env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all --preload-images
+  > ```
+  >
+  > To verify the sidecar image actually deployed:
+  >
+  > ```bash
+  > kubectl -n kagenti-system get cm kagenti-platform-config \
+  >   -o jsonpath='{.data.authbridge}'
+  > ```
+  >
+  > Expect `ghcr.io/kagenti/kagenti-extensions/authbridge:v0.6.0-alpha.7`
+  > or newer.
 
 **Configure the judge** in your `.env` (consumed by the IBAC plugin
 fragment via envsubst when `ibac` is in the active set):
