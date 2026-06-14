@@ -500,7 +500,7 @@ TOOL_JSON=$(cat <<EOF
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": false,
   "spireEnabled": false
 }
@@ -598,10 +598,6 @@ fi
 echo ""
 
 # Step 12: Update openai-secret and set memory limit
-echo "=========================================="
-echo "Final Configuration"
-echo "=========================================="
-echo ""
 
 # Step 12.1: Set resource limits
 echo "Step 12.1: Setting resource limits..."
@@ -625,66 +621,48 @@ echo ""
 echo "Step 13: Performing MCP server health check..."
 echo ""
 
-MCP_HEALTH_PORT=8009
-MCP_API="http://localhost:$MCP_HEALTH_PORT"
-# Kagenti appends -mcp to the service name
-MCP_SVC_NAME="${TOOL_NAME}-mcp"
+# Use HTTP route endpoint instead of port-forward
+MCP_HTTP_ROUTE_URL="http://${TOOL_NAME}.${NAMESPACE}.localtest.me:8080"
+MCP_API="$MCP_HTTP_ROUTE_URL"
 
-# Verify the service exists
-if ! kubectl get svc "$MCP_SVC_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo "⚠ Service $MCP_SVC_NAME not found, trying $TOOL_NAME..."
-    MCP_SVC_NAME="$TOOL_NAME"
-    if ! kubectl get svc "$MCP_SVC_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-        echo "⚠ Service $MCP_SVC_NAME not found either, skipping health check"
-        MCP_SVC_NAME=""
+echo "Using HTTP route URL: $MCP_HTTP_ROUTE_URL"
+
+# Wait for HTTP route to be ready (up to 60s)
+HEALTH_CHECK_PASSED=false
+for i in $(seq 1 60); do
+    # Health check: POST an MCP initialize request to /mcp
+    MCP_HTTP_CODE=$(curl -s -o /tmp/mcp_health_response.txt -w "%{http_code}" --max-time 3 \
+        -X POST "$MCP_API/mcp" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" \
+        -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}}}' \
+        2>/dev/null) || true
+    
+    MCP_RESPONSE=$(cat /tmp/mcp_health_response.txt 2>/dev/null || echo "")
+
+    if [ "$MCP_HTTP_CODE" = "200" ]; then
+        echo "✓ MCP server health check passed (HTTP 200 on /mcp)"
+        HEALTH_CHECK_PASSED=true
+        break
     fi
-fi
-
-if [ -n "$MCP_SVC_NAME" ]; then
-    # Retry with port-forward restart (up to 60s)
-    # After a rollout the port-forward may die if the pod endpoint isn't registered yet
-    echo "Starting port-forward to $MCP_SVC_NAME on port $MCP_HEALTH_PORT..."
-    MCP_PF_PID=""
-    HEALTH_CHECK_PASSED=false
-    for i in $(seq 1 60); do
-        # (Re)start port-forward if not running
-        if [ -z "$MCP_PF_PID" ] || ! kill -0 $MCP_PF_PID 2>/dev/null; then
-            [ -n "$MCP_PF_PID" ] && { kill $MCP_PF_PID 2>/dev/null || true; wait $MCP_PF_PID 2>/dev/null || true; }
-            kubectl port-forward -n "$NAMESPACE" svc/"$MCP_SVC_NAME" $MCP_HEALTH_PORT:8000 >/dev/null 2>&1 &
-            MCP_PF_PID=$!
-            sleep 2
-        fi
-
-        # Health check: POST an MCP initialize request to /mcp
-        MCP_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 \
-            -X POST "$MCP_API/mcp" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json, text/event-stream" \
-            -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}}}' \
-            2>/dev/null) || true
-
-        if [ "$MCP_HTTP_CODE" = "200" ]; then
-            echo "✓ MCP server health check passed (HTTP 200 on /mcp)"
-            HEALTH_CHECK_PASSED=true
-            break
-        fi
-
+    
+    # Check for gateway errors
+    if echo "$MCP_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
         if [ $((i % 10)) -eq 0 ]; then
-            echo "  Waiting for MCP server to be ready... (${i}s)"
+            echo "  Gateway error (backend not ready yet)... (${i}s)"
         fi
-        sleep 1
-    done
-
-    # Clean up port-forward
-    if [ -n "$MCP_PF_PID" ]; then
-        kill $MCP_PF_PID 2>/dev/null || true
-        wait $MCP_PF_PID 2>/dev/null || true
+    elif [ $((i % 10)) -eq 0 ]; then
+        echo "  Waiting for MCP server to be ready... (${i}s)"
     fi
+    sleep 1
+done
 
-    if [ "$HEALTH_CHECK_PASSED" = false ]; then
-        echo "⚠ MCP server did not respond to health check after 60s"
-        echo "  The server may still be starting up"
+if [ "$HEALTH_CHECK_PASSED" = false ]; then
+    echo "⚠ MCP server did not respond to health check after 60s"
+    if [ -n "$MCP_RESPONSE" ]; then
+        echo "  Last response: $MCP_RESPONSE"
     fi
+    echo "  The server may still be starting up or HTTP route may not be fully configured"
 fi
 
 # Step 14: Register with MCP Gateway (conditional)
@@ -808,7 +786,7 @@ if [ -n "$OPENAI_API_BASE" ]; then
 fi
 echo ""
 echo "To access the tool:"
-echo "  kubectl port-forward -n $NAMESPACE svc/$TOOL_NAME 8000:8000"
+echo "  HTTP Route URL: http://${TOOL_NAME}.${NAMESPACE}.localtest.me:8080"
 echo ""
 
 # Made with Bob

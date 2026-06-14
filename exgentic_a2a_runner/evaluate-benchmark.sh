@@ -145,29 +145,19 @@ if [ "$CURRENT_CONTEXT" != "kind-kagenti" ]; then
 fi
 
 echo ""
-echo "Setting up port forwarding..."
+echo "Using HTTP route endpoints (no port-forwarding needed)..."
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
-    echo "  - MCP Gateway: localhost:7770 -> $MCP_GATEWAY_SERVICE.$MCP_GATEWAY_NAMESPACE:$MCP_GATEWAY_PORT"
+    echo "  - MCP Gateway: http://$MCP_GATEWAY_SERVICE.$MCP_GATEWAY_NAMESPACE.localtest.me:8080"
 else
-    echo "  - MCP Server: localhost:7770 -> $BENCHMARK_SERVICE.team1:8000"
+    # Remove -mcp suffix for HTTP route
+    BENCHMARK_DEPLOYMENT="${BENCHMARK_SERVICE%-mcp}"
+    echo "  - MCP Server: http://$BENCHMARK_DEPLOYMENT.team1.localtest.me:8080"
 fi
-echo "  - A2A Agent:  localhost:7701 -> $AGENT_SERVICE.team1:8080"
+echo "  - A2A Agent:  http://$AGENT_SERVICE.team1.localtest.me:8080"
 if [ "$MLFLOW_ENABLED" = "true" ]; then
-    echo "  - OTEL Collector: localhost:${OTEL_COLLECTOR_LOCAL_PORT} -> ${OTEL_COLLECTOR_SERVICE}.${OTEL_COLLECTOR_NAMESPACE}:4317"
+    echo "  - OTEL Collector: (port-forward still needed) localhost:${OTEL_COLLECTOR_LOCAL_PORT} -> ${OTEL_COLLECTOR_SERVICE}.${OTEL_COLLECTOR_NAMESPACE}:4317"
 fi
 echo ""
-
-# Kill any existing port-forwards on these ports
-PORTS_TO_CLEANUP="7770 7701"
-if [ "$MLFLOW_ENABLED" = "true" ]; then
-    PORTS_TO_CLEANUP="$PORTS_TO_CLEANUP ${OTEL_COLLECTOR_LOCAL_PORT}"
-fi
-
-echo "Cleaning up existing port-forwards on ports:${PORTS_TO_CLEANUP}"
-for PORT in $PORTS_TO_CLEANUP; do
-    lsof -ti:$PORT | xargs kill -9 2>/dev/null || true
-done
-sleep 2
 
 # Check if pods are ready before port-forwarding
 echo "Checking if pods are ready..."
@@ -218,21 +208,12 @@ fi
 
 # Additional wait to ensure services are fully started
 echo "Waiting for services to be fully started..."
-sleep 10
+sleep 5
 
-# Start port forwarding in background (suppress "Handling connection" messages)
-if [ "$USE_MCP_GATEWAY" = "true" ]; then
-    echo "Starting port-forward for MCP Gateway..."
-    "$KUBECTL_BIN" port-forward -n $MCP_GATEWAY_NAMESPACE svc/$MCP_GATEWAY_SERVICE 7770:$MCP_GATEWAY_PORT >/dev/null 2>&1 &
-else
-    echo "Starting port-forward for MCP server..."
-    "$KUBECTL_BIN" port-forward -n team1 svc/$BENCHMARK_SERVICE 7770:8000 >/dev/null 2>&1 &
-fi
-PF_MCP_PID=$!
-
-echo "Starting port-forward for A2A agent..."
-"$KUBECTL_BIN" port-forward -n team1 svc/$AGENT_SERVICE 7701:8080 >/dev/null 2>&1 &
-PF_AGENT_PID=$!
+# Only set up port-forward for OTEL collector if MLflow is enabled
+PF_MCP_PID=""
+PF_AGENT_PID=""
+PF_OTEL_COLLECTOR_PID=""
 
 if [ "$MLFLOW_ENABLED" = "true" ]; then
     echo "Starting port-forward for OTEL collector (traces -> MLflow)..."
@@ -249,68 +230,64 @@ echo "Starting port-forward for Prometheus..."
 "$KUBECTL_BIN" port-forward -n $PROMETHEUS_NAMESPACE svc/$PROMETHEUS_SERVICE ${PROMETHEUS_LOCAL_PORT}:9090 >/dev/null 2>&1 &
 PF_PROMETHEUS_PID=$!
 
-# Wait for port forwards to be ready
-echo "Waiting for port forwards to be ready..."
-sleep 5
-
-# Check if port forwards are working
-if ! ps -p $PF_MCP_PID > /dev/null; then
-    echo "Error: MCP port-forward failed to start"
-    exit 1
-fi
-
-if ! ps -p $PF_AGENT_PID > /dev/null; then
-    echo "Error: Agent port-forward failed to start"
-    kill $PF_MCP_PID 2>/dev/null || true
-    exit 1
-fi
-
-if [ "$MLFLOW_ENABLED" = "true" ] && ! ps -p $PF_OTEL_COLLECTOR_PID > /dev/null; then
-    echo "Error: OTEL collector port-forward failed to start"
-    kill $PF_MCP_PID 2>/dev/null || true
-    kill $PF_AGENT_PID 2>/dev/null || true
-    exit 1
-fi
-
-echo ""
-echo "✓ Port forwarding established"
-echo "  MCP Server PID: $PF_MCP_PID"
-echo "  A2A Agent PID:  $PF_AGENT_PID"
+# Wait for OTEL port forward to be ready if enabled
 if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "Waiting for OTEL collector port-forward to be ready..."
+    sleep 3
+    
+    if ! ps -p $PF_OTEL_COLLECTOR_PID > /dev/null; then
+        echo "Error: OTEL collector port-forward failed to start"
+        exit 1
+    fi
+    
+    echo ""
+    echo "✓ OTEL collector port-forward established"
     echo "  OTEL Collector PID: $PF_OTEL_COLLECTOR_PID"
+    echo ""
 fi
-echo ""
 
 # Function to cleanup on exit
 cleanup() {
     echo ""
-    echo "Cleaning up port forwards..."
-    kill $PF_MCP_PID 2>/dev/null || true
-    kill $PF_AGENT_PID 2>/dev/null || true
-    if [ "$MLFLOW_ENABLED" = "true" ]; then
+    echo "Cleaning up..."
+    if [ "$MLFLOW_ENABLED" = "true" ] && [ -n "$PF_OTEL_COLLECTOR_PID" ]; then
+        echo "Stopping OTEL collector port-forward..."
         kill $PF_OTEL_COLLECTOR_PID 2>/dev/null || true
     fi
-    kill $PF_PROMETHEUS_PID 2>/dev/null || true
+    if [ -n "$PF_PROMETHEUS_PID" ]; then
+        echo "Stopping Prometheus port-forward..."
+        kill $PF_PROMETHEUS_PID 2>/dev/null || true
+    fi
     echo "Done."
 }
 
 trap cleanup EXIT INT TERM
 
-# Test connectivity
+# Test connectivity using HTTP routes
 echo "Testing connectivity..."
+
+# Set URLs based on gateway mode
+if [ "$USE_MCP_GATEWAY" = "true" ]; then
+    MCP_TEST_URL="http://$MCP_GATEWAY_SERVICE.$MCP_GATEWAY_NAMESPACE.localtest.me:8080/health"
+else
+    BENCHMARK_DEPLOYMENT="${BENCHMARK_SERVICE%-mcp}"
+    MCP_TEST_URL="http://$BENCHMARK_DEPLOYMENT.team1.localtest.me:8080/health"
+fi
+AGENT_TEST_URL="http://$AGENT_SERVICE.team1.localtest.me:8080/.well-known/agent-card.json"
+
 echo -n "  MCP Server: "
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:7770/health 2>/dev/null | grep -q "200\|404"; then
+if curl -s -o /dev/null -w "%{http_code}" "$MCP_TEST_URL" 2>/dev/null | grep -q "200\|404"; then
     echo "✓ Reachable"
 else
-    echo "✗ MCP Server not reachable at localhost:7770"
+    echo "✗ MCP Server not reachable at $MCP_TEST_URL"
     exit 1
 fi
 
 echo -n "  A2A Agent:  "
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:7701/.well-known/agent-card.json 2>/dev/null | grep -q "200\|404"; then
+if curl -s -o /dev/null -w "%{http_code}" "$AGENT_TEST_URL" 2>/dev/null | grep -q "200\|404"; then
     echo "✓ Reachable"
 else
-    echo "✗ A2A Agent not reachable at localhost:7701"
+    echo "✗ A2A Agent not reachable at $AGENT_TEST_URL"
     exit 1
 fi
 
@@ -349,9 +326,14 @@ if [ -f ".env" ]; then
     echo ""
 fi
 
-# Set URLs for port-forwarded services (override .env if present)
-export EXGENTIC_MCP_SERVER_URL="http://localhost:7770/mcp"
-export A2A_BASE_URL="http://localhost:7701"
+# Set URLs for HTTP route services (override .env if present)
+if [ "$USE_MCP_GATEWAY" = "true" ]; then
+    export EXGENTIC_MCP_SERVER_URL="http://$MCP_GATEWAY_SERVICE.$MCP_GATEWAY_NAMESPACE.localtest.me:8080/mcp"
+else
+    BENCHMARK_DEPLOYMENT="${BENCHMARK_SERVICE%-mcp}"
+    export EXGENTIC_MCP_SERVER_URL="http://$BENCHMARK_DEPLOYMENT.team1.localtest.me:8080/mcp"
+fi
+export A2A_BASE_URL="http://$AGENT_SERVICE.team1.localtest.me:8080"
 
 # Set tool prefix when using MCP gateway (gateway namespaces tools with a prefix)
 if [ "$USE_MCP_GATEWAY" = "true" ]; then

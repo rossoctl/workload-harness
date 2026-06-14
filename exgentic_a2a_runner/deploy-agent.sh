@@ -504,7 +504,9 @@ if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_URL="http://mcp-gateway-istio.gateway-system.svc.cluster.local:8080/mcp"
     echo "Using MCP Gateway URL: $MCP_URL"
 else
-    MCP_URL="http://${TOOL_NAME}-mcp:8000/mcp"
+    # Use internal Kubernetes service DNS for cluster communication
+    MCP_URL="http://${TOOL_NAME}-mcp.${NAMESPACE}.svc.cluster.local:8000/mcp"
+    echo "Using MCP internal service URL: $MCP_URL"
 fi
 
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -670,7 +672,7 @@ if [ "$DEPLOYMENT_TYPE" = "source" ]; then
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
@@ -700,7 +702,7 @@ else
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
@@ -888,61 +890,48 @@ fi
 # Step 12: Test agent card access
 echo "Step 12: Testing agent card access..."
 
-# Check if service exists
-if ! kubectl get svc $AGENT_NAME -n $NAMESPACE >/dev/null 2>&1; then
-    echo "⚠ Service $AGENT_NAME not found, skipping card test"
-else
-    # Set up port-forward to agent
-    AGENT_PORT=8084
+
+# Use HTTP route endpoint instead of port-forward
+AGENT_HTTP_ROUTE_URL="http://${AGENT_NAME}.${NAMESPACE}.localtest.me:8080"
+
+echo "Using HTTP route URL: $AGENT_HTTP_ROUTE_URL"
+
+# Wait for HTTP route to be ready (up to 60s)
+CARD_RESPONSE=""
+HTTP_CODE=""
+for i in $(seq 1 60); do
+    HTTP_CODE=$(curl -s -o /tmp/agent_card_response.txt -w "%{http_code}" --max-time 3 "${AGENT_HTTP_ROUTE_URL}/.well-known/agent-card.json" 2>/dev/null) || true
+    CARD_RESPONSE=$(cat /tmp/agent_card_response.txt 2>/dev/null || echo "")
     
-    # Check if port is already in use
-    if nc -z localhost $AGENT_PORT 2>/dev/null; then
-        echo "⚠ Port $AGENT_PORT already in use, skipping card test"
-    else
-        # Retry until agent responds (up to 60s)
-        # After a rollout, the new pod's endpoint may not be registered yet,
-        # causing port-forward to exit immediately. Restart it on each attempt.
-        CARD_RESPONSE=""
-        AGENT_PF_PID=""
-        for i in $(seq 1 60); do
-            # (Re)start port-forward if it's not running
-            if [ -z "$AGENT_PF_PID" ] || ! kill -0 $AGENT_PF_PID 2>/dev/null; then
-                [ -n "$AGENT_PF_PID" ] && { kill $AGENT_PF_PID 2>/dev/null || true; wait $AGENT_PF_PID 2>/dev/null || true; }
-                kubectl port-forward -n $NAMESPACE svc/$AGENT_NAME $AGENT_PORT:8080 >/dev/null 2>&1 &
-                AGENT_PF_PID=$!
-                sleep 2
-            fi
-
-            CARD_RESPONSE=$(curl -s --max-time 3 http://localhost:$AGENT_PORT/.well-known/agent-card.json 2>/dev/null) || true
-            if [ -n "$CARD_RESPONSE" ]; then
-                break
-            fi
-            if [ $((i % 10)) -eq 0 ]; then
-                echo "  Waiting for agent to be ready... (${i}s)"
-            fi
-            sleep 1
-        done
-
-        # Always clean up port-forward
-        if [ -n "$AGENT_PF_PID" ]; then
-            kill $AGENT_PF_PID 2>/dev/null || true
-            wait $AGENT_PF_PID 2>/dev/null || true
+    # Check for successful response (HTTP 200) and valid JSON
+    if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
+        break
+    fi
+    
+    # Check for gateway errors
+    if echo "$CARD_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
+        if [ $((i % 10)) -eq 0 ]; then
+            echo "  Gateway error (backend not ready yet)... (${i}s)"
         fi
+    elif [ $((i % 10)) -eq 0 ]; then
+        echo "  Waiting for agent to be ready... (${i}s)"
+    fi
+    sleep 1
+done
 
-            if [ -z "$CARD_RESPONSE" ]; then
-                echo "⚠ No response from agent card endpoint after 60s"
-                echo "  Agent is deployed and running, but card endpoint did not respond"
-            else
-                # Check if response contains error
-                if echo "$CARD_RESPONSE" | grep -q '"error"'; then
-                    echo "⚠ Agent responded with error:"
-                    echo "$CARD_RESPONSE" | jq '.' 2>/dev/null || echo "$CARD_RESPONSE"
-                else
-                    echo "✓ Agent card access successful:"
-                    echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "$CARD_RESPONSE"
-                fi
-            fi
-        fi
+if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
+    echo "✓ Agent card access successful:"
+    echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "$CARD_RESPONSE"
+else
+    echo "✗ Agent card endpoint not accessible after 60s"
+    echo "  HTTP Code: $HTTP_CODE"
+    if [ -n "$CARD_RESPONSE" ]; then
+        echo "  Response: $CARD_RESPONSE"
+    fi
+    echo "  Agent is deployed and running, but HTTP route may not be fully configured"
+    echo ""
+    echo "Deployment failed: Agent card endpoint not accessible"
+    exit 1
 fi
 
 echo ""
