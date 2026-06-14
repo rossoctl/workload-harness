@@ -40,6 +40,7 @@ KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
+USE_LOCAL_IMAGE="false"
 
 # AuthBridge plugin pipeline composition. See AUTHBRIDGE_PIPELINE_SPEC.md.
 # PIPELINE_PRESET is set by --plugin-preset; PIPELINE_SELECTORS accumulates
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --local-image)
+            USE_LOCAL_IMAGE="true"
+            shift
+            ;;
         --plugin)
             PIPELINE_SELECTORS+=("+$2")
             shift 2
@@ -104,6 +109,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
+            echo "  --local-image              Use locally built image instead of pulling from registry (image deployments only)"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -167,11 +173,16 @@ else
     # Replace underscores with hyphens for Kubernetes compatibility
     AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
     AGENT_NAME="${AGENT_NAME//_/-}"
-    # Image name keeps underscores (container images allow them)
-    IMAGE_NAME="localhost/${FULL_AGENT_NAME}:latest"
-    # Split image name and tag for API
+    
+    # Default to Exgentic registry, can be overridden with environment variable
+    EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
+    IMAGE_TAG="${IMAGE_TAG:-latest}"
+    REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
+    LOCAL_IMAGE_NAME="localhost/${FULL_AGENT_NAME}:latest"
+    
+    # Will be set after image pull/check
+    IMAGE_NAME="$LOCAL_IMAGE_NAME"
     IMAGE_NAME_WITHOUT_TAG="localhost/${FULL_AGENT_NAME}"
-    IMAGE_TAG="latest"
 fi
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
@@ -190,9 +201,9 @@ echo "Model: $MODEL_NAME"
 echo "=========================================="
 echo ""
 
-# Step 0: If deploying from image, check and sync image
+# Step 0: If deploying from image, get and sync image
 if [ "$DEPLOYMENT_TYPE" = "image" ]; then
-    echo "Step 0: Checking for local image and syncing if needed..."
+    echo "Step 0: Setting up container image..."
     
     # Determine container runtime
     if command -v podman &> /dev/null; then
@@ -206,14 +217,42 @@ if [ "$DEPLOYMENT_TYPE" = "image" ]; then
     
     echo "Using container runtime: $CONTAINER_CMD"
     
-    # Check if image exists locally
-    if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo "Error: Image $IMAGE_NAME not found locally"
-        echo "Please build the image first"
-        exit 1
+    if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+        # Force use of local image
+        echo "Using local image (--local-image flag set): $LOCAL_IMAGE_NAME"
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        
+        if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "Error: Local image $IMAGE_NAME not found"
+            echo "Please build the image first"
+            exit 1
+        fi
+        
+        echo "✓ Local image found: $IMAGE_NAME"
+    else
+        # Try to use remote image from Exgentic registry first
+        echo "Attempting to pull image from Exgentic registry: $REMOTE_IMAGE_NAME"
+        
+        if $CONTAINER_CMD pull "$REMOTE_IMAGE_NAME" ; then
+            echo "✓ Successfully pulled image from Exgentic registry"
+            # Tag it as localhost for kind compatibility
+            $CONTAINER_CMD tag "$REMOTE_IMAGE_NAME" "$LOCAL_IMAGE_NAME"
+            IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        else
+            echo "Warning: Could not pull from Exgentic registry, checking for local image..."
+            IMAGE_NAME="$LOCAL_IMAGE_NAME"
+            
+            if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+                echo "Error: Image $IMAGE_NAME not found locally and could not pull from registry"
+                echo "Please either:"
+                echo "  1. Build the image locally and use --local-image flag, or"
+                echo "  2. Ensure you have access to $REMOTE_IMAGE_NAME"
+                exit 1
+            fi
+            
+            echo "✓ Using local image: $IMAGE_NAME"
+        fi
     fi
-    
-    echo "✓ Image $IMAGE_NAME found locally"
     
     # Check if kind is available
     if ! command -v kind &> /dev/null; then

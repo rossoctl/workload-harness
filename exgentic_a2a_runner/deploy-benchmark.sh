@@ -13,6 +13,7 @@ KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 USE_MCP_GATEWAY="false"
+USE_LOCAL_IMAGE="false"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --local-image)
+            USE_LOCAL_IMAGE="true"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> [OPTIONS]"
             echo ""
@@ -48,6 +53,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Register MCP server with the MCP Gateway"
+            echo "  --local-image              Use locally built image instead of pulling from registry"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini"
             echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin"
             echo "  $0 --benchmark tau2 --use-mcp-gateway"
+            echo "  $0 --benchmark gsm8k --local-image"
             exit 0
             ;;
         -*)
@@ -77,7 +84,11 @@ if [ -z "$BENCHMARK_NAME" ]; then
     exit 1
 fi
 
-IMAGE_NAME="localhost/exgentic-mcp-${BENCHMARK_NAME}:latest"
+# Default to Exgentic registry, can be overridden with environment variable
+EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/exgentic-mcp-${BENCHMARK_NAME}:${IMAGE_TAG}"
+LOCAL_IMAGE_NAME="localhost/exgentic-mcp-${BENCHMARK_NAME}:latest"
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
 KAGENTI_API="http://kagenti-api.localtest.me:8080"
@@ -89,8 +100,8 @@ echo "=========================================="
 echo "Model: $MODEL_NAME"
 echo ""
 
-# Step 1: Check if image exists locally
-echo "Step 1: Checking for local image..."
+# Step 1: Determine container runtime and get image
+echo "Step 1: Setting up container image..."
 if command -v podman &> /dev/null; then
     CONTAINER_CMD="podman"
 elif command -v docker &> /dev/null; then
@@ -102,13 +113,44 @@ fi
 
 echo "Using container runtime: $CONTAINER_CMD"
 
-if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-    echo "Error: Image $IMAGE_NAME not found locally"
-    echo "Please build the image first"
-    exit 1
+if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+    # Force use of local image
+    echo "Using local image (--local-image flag set): $LOCAL_IMAGE_NAME"
+    IMAGE_NAME="$LOCAL_IMAGE_NAME"
+    
+    if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+        echo "Error: Local image $IMAGE_NAME not found"
+        echo "Please build the image first"
+        exit 1
+    fi
+    
+    echo "✓ Local image found: $IMAGE_NAME"
+else
+    # Try to use remote image from Exgentic registry first
+    IMAGE_NAME="$REMOTE_IMAGE_NAME"
+    echo "Attempting to pull image from Exgentic registry: $REMOTE_IMAGE_NAME"
+    
+    if $CONTAINER_CMD pull "$REMOTE_IMAGE_NAME" ; then
+        echo "✓ Successfully pulled image from Exgentic registry"
+        # Tag it as localhost for kind compatibility
+        $CONTAINER_CMD tag "$REMOTE_IMAGE_NAME" "$LOCAL_IMAGE_NAME"
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+    else
+        echo "Warning: Could not pull from Exgentic registry, checking for local image..."
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        
+        if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "Error: Image $IMAGE_NAME not found locally and could not pull from registry"
+            echo "Please either:"
+            echo "  1. Build the image locally and use --local-image flag, or"
+            echo "  2. Ensure you have access to $REMOTE_IMAGE_NAME"
+            exit 1
+        fi
+        
+        echo "✓ Using local image: $IMAGE_NAME"
+    fi
 fi
 
-echo "✓ Image $IMAGE_NAME found locally"
 echo ""
 
 # Step 2: Check if image needs syncing

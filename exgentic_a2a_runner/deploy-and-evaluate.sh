@@ -23,6 +23,7 @@ KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
 MLFLOW_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
+USE_LOCAL_IMAGE="false"
 
 # AuthBridge plugin pipeline flags forwarded to deploy-agent.sh.
 # See AUTHBRIDGE_PIPELINE_SPEC.md for the resolver semantics.
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --local-image)
+            USE_LOCAL_IMAGE="true"
+            shift
+            ;;
         --plugin)
             PIPELINE_SELECTORS+=("--plugin" "$2")
             shift 2
@@ -95,6 +100,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
             echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
+            echo "  --local-image              Use locally built images instead of pulling from registry"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -164,10 +170,15 @@ else
 fi
 echo ""
 
-# Build gateway flag for sub-scripts
+# Build gateway and local-image flags for sub-scripts
 MCP_GATEWAY_FLAG=""
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_GATEWAY_FLAG="--use-mcp-gateway"
+fi
+
+LOCAL_IMAGE_FLAG=""
+if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+    LOCAL_IMAGE_FLAG="--local-image"
 fi
 
 # Build the plugin-flag passthrough array for deploy-agent.sh.
@@ -190,7 +201,8 @@ echo "=========================================="
     --model "$MODEL_NAME" \
     --keycloak-user "$KEYCLOAK_USERNAME" \
     --keycloak-pass "$KEYCLOAK_PASSWORD" \
-    $MCP_GATEWAY_FLAG
+    $MCP_GATEWAY_FLAG \
+    $LOCAL_IMAGE_FLAG
 
 if [ $? -ne 0 ]; then
     echo "Error: Benchmark deployment failed"
@@ -210,6 +222,7 @@ echo "=========================================="
     --keycloak-user "$KEYCLOAK_USERNAME" \
     --keycloak-pass "$KEYCLOAK_PASSWORD" \
     $MCP_GATEWAY_FLAG \
+    $LOCAL_IMAGE_FLAG \
     "${PLUGIN_FLAGS[@]}"
 
 if [ $? -ne 0 ]; then
