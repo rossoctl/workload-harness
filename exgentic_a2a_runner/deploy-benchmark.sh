@@ -735,7 +735,7 @@ ROUTE_EOF
 
     echo "Creating MCPServerRegistration for $TOOL_NAME..."
     kubectl apply -f - <<REG_EOF
-apiVersion: mcp.kagenti.com/v1alpha1
+apiVersion: mcp.kuadrant.io/v1alpha1
 kind: MCPServerRegistration
 metadata:
   name: ${TOOL_NAME}-servers
