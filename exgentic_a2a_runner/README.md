@@ -366,8 +366,64 @@ When `--mlflow` is supplied, it is passed through to `evaluate-benchmark.sh` to 
 # With custom Keycloak credentials
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin
 
+# Dry run mode - print commands without executing them
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --dry
+
 # Show help
 ./deploy-and-evaluate.sh --help
+```
+
+#### Dry Run Mode
+
+The `--dry` flag enables dry-run mode, which prints all commands that would be executed without actually running them. This is useful for:
+- Verifying command syntax before execution
+- Debugging deployment issues
+- Understanding what the script will do
+- Documentation and training purposes
+
+```bash
+# See what commands would be executed
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --dry
+
+# Dry run with all options
+./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling \
+  --model Azure/gpt-4o-mini --mlflow --use-mcp-gateway --dry
+```
+
+**Example output:**
+```
+========================================
+Deploy and Evaluate Exgentic Benchmark
+========================================
+Benchmark: tau2
+Agent: tool_calling
+Model: Azure/gpt-4.1
+Keycloak User: admin
+MLflow tracing: false
+MCP Gateway: false
+Dry run: true
+
+========================================
+Step 1/3: Deploying Benchmark
+========================================
+[DRY RUN] Would execute:
+./deploy-benchmark.sh --benchmark "tau2" --model "Azure/gpt-4.1" --keycloak-user "admin" --keycloak-pass "admin"
+
+========================================
+Step 2/3: Deploying Agent
+========================================
+[DRY RUN] Would execute:
+./deploy-agent.sh --benchmark "tau2" --agent "tool_calling" --model "Azure/gpt-4.1" --keycloak-user "admin" --keycloak-pass "admin"
+
+========================================
+Step 3/3: Running Evaluation
+========================================
+[DRY RUN] Would execute:
+./evaluate-benchmark.sh --benchmark "tau2" --agent "tool_calling" --experiment "default"
+
+========================================
+✓ Dry run completed - no commands executed
+========================================
 ```
 
 ### Running Benchmarks

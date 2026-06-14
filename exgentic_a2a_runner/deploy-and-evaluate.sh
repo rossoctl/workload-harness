@@ -24,6 +24,7 @@ KEYCLOAK_PASSWORD="unknown"
 MLFLOW_ENABLED="false"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_LOCAL_IMAGE="false"
+DRY_RUN="false"
 
 # AuthBridge plugin pipeline flags forwarded to deploy-agent.sh.
 # See AUTHBRIDGE_PIPELINE_SPEC.md for the resolver semantics.
@@ -70,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             USE_LOCAL_IMAGE="true"
             shift
             ;;
+        --dry)
+            DRY_RUN="true"
+            shift
+            ;;
         --plugin)
             PIPELINE_SELECTORS+=("--plugin" "$2")
             shift 2
@@ -101,6 +106,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --local-image              Use locally built images instead of pulling from registry"
+            echo "  --dry                      Dry run mode - print commands without executing them"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -161,6 +167,7 @@ echo "Model: $MODEL_NAME"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
 echo "MLflow tracing: $MLFLOW_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
+echo "Dry run: $DRY_RUN"
 if [ -n "$PIPELINE_PRESET" ] || [ ${#PIPELINE_SELECTORS[@]} -gt 0 ] || [ -n "$PIPELINE_OVERLAY_FILE" ]; then
     echo "Plugin preset: ${PIPELINE_PRESET:-<none>}"
     echo "Plugin selectors: ${PIPELINE_SELECTORS[*]:-<none>}"
@@ -197,66 +204,105 @@ fi
 echo "=========================================="
 echo "Step 1/3: Deploying Benchmark"
 echo "=========================================="
-"$SCRIPT_DIR/deploy-benchmark.sh" --benchmark "$BENCHMARK_NAME" \
-    --model "$MODEL_NAME" \
-    --keycloak-user "$KEYCLOAK_USERNAME" \
-    --keycloak-pass "$KEYCLOAK_PASSWORD" \
-    $MCP_GATEWAY_FLAG \
-    $LOCAL_IMAGE_FLAG
 
-if [ $? -ne 0 ]; then
-    echo "Error: Benchmark deployment failed"
-    exit 1
+if [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY RUN] Would execute:"
+    echo "$SCRIPT_DIR/deploy-benchmark.sh --benchmark $BENCHMARK_NAME --model $MODEL_NAME --keycloak-user $KEYCLOAK_USERNAME --keycloak-pass $KEYCLOAK_PASSWORD $MCP_GATEWAY_FLAG $LOCAL_IMAGE_FLAG"
+    echo ""
+else
+    "$SCRIPT_DIR/deploy-benchmark.sh" --benchmark "$BENCHMARK_NAME" \
+        --model "$MODEL_NAME" \
+        --keycloak-user "$KEYCLOAK_USERNAME" \
+        --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        $MCP_GATEWAY_FLAG \
+        $LOCAL_IMAGE_FLAG
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Benchmark deployment failed"
+        exit 1
+    fi
+    
+    echo ""
+    echo "✓ Benchmark deployed successfully"
+    echo ""
 fi
-
-echo ""
-echo "✓ Benchmark deployed successfully"
-echo ""
 
 # Step 2: Deploy agent
 echo "=========================================="
 echo "Step 2/3: Deploying Agent"
 echo "=========================================="
-"$SCRIPT_DIR/deploy-agent.sh" --benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" \
-    --model "$MODEL_NAME" \
-    --keycloak-user "$KEYCLOAK_USERNAME" \
-    --keycloak-pass "$KEYCLOAK_PASSWORD" \
-    $MCP_GATEWAY_FLAG \
-    $LOCAL_IMAGE_FLAG \
-    "${PLUGIN_FLAGS[@]}"
 
-if [ $? -ne 0 ]; then
-    echo "Error: Agent deployment failed"
-    exit 1
+if [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY RUN] Would execute:"
+    AGENT_CMD_DISPLAY="$SCRIPT_DIR/deploy-agent.sh --benchmark $BENCHMARK_NAME --agent $AGENT_NAME --model $MODEL_NAME --keycloak-user $KEYCLOAK_USERNAME --keycloak-pass $KEYCLOAK_PASSWORD $MCP_GATEWAY_FLAG $LOCAL_IMAGE_FLAG"
+    if [ ${#PLUGIN_FLAGS[@]} -gt 0 ]; then
+        AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY ${PLUGIN_FLAGS[*]}"
+    fi
+    echo "$AGENT_CMD_DISPLAY"
+    echo ""
+else
+    "$SCRIPT_DIR/deploy-agent.sh" --benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" \
+        --model "$MODEL_NAME" \
+        --keycloak-user "$KEYCLOAK_USERNAME" \
+        --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        $MCP_GATEWAY_FLAG \
+        $LOCAL_IMAGE_FLAG \
+        "${PLUGIN_FLAGS[@]}"
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Agent deployment failed"
+        exit 1
+    fi
+    
+    echo ""
+    echo "✓ Agent deployed successfully"
+    echo ""
 fi
-
-echo ""
-echo "✓ Agent deployed successfully"
-echo ""
 
 # Step 3: Run evaluation
 echo "=========================================="
 echo "Step 3/3: Running Evaluation"
 echo "=========================================="
-EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
-if [ "$MLFLOW_ENABLED" = "true" ]; then
-    EVALUATE_ARGS+=(--mlflow)
-fi
-if [ "$USE_MCP_GATEWAY" = "true" ]; then
-    EVALUATE_ARGS+=(--use-mcp-gateway)
+
+if [ "$DRY_RUN" = "true" ]; then
+    echo "[DRY RUN] Would execute:"
+    EVALUATE_CMD_DISPLAY="$SCRIPT_DIR/evaluate-benchmark.sh --benchmark $BENCHMARK_NAME --agent $AGENT_NAME --experiment $EXPERIMENT_NAME"
+    if [ "$MLFLOW_ENABLED" = "true" ]; then
+        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY --mlflow"
+    fi
+    if [ "$USE_MCP_GATEWAY" = "true" ]; then
+        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY --use-mcp-gateway"
+    fi
+    echo "$EVALUATE_CMD_DISPLAY"
+    echo ""
+else
+    EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
+    if [ "$MLFLOW_ENABLED" = "true" ]; then
+        EVALUATE_ARGS+=(--mlflow)
+    fi
+    if [ "$USE_MCP_GATEWAY" = "true" ]; then
+        EVALUATE_ARGS+=(--use-mcp-gateway)
+    fi
+    
+    "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}"
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Evaluation failed"
+        exit 1
+    fi
 fi
 
-"$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}"
-
-if [ $? -ne 0 ]; then
-    echo "Error: Evaluation failed"
-    exit 1
+if [ "$DRY_RUN" = "true" ]; then
+    echo ""
+    echo "=========================================="
+    echo "✓ Dry run completed - no commands executed"
+    echo "=========================================="
+else
+    echo ""
+    echo "=========================================="
+    echo "✓ All steps completed successfully!"
+    echo "=========================================="
 fi
-
-echo ""
-echo "=========================================="
-echo "✓ All steps completed successfully!"
-echo "=========================================="
 echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent: $AGENT_NAME"
 echo "Experiment: $EXPERIMENT_NAME"
