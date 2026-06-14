@@ -176,10 +176,8 @@ fi
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
-KAGENTI_API="http://localhost:8001"
-KAGENTI_PORT=8001
-KEYCLOAK_API="http://localhost:8002"
-KEYCLOAK_PORT=8002
+KAGENTI_API="http://kagenti-api.localtest.me:8080"
+KEYCLOAK_API="http://keycloak.localtest.me:8080"
 
 echo "=========================================="
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -266,15 +264,12 @@ if [ "$DEPLOYMENT_TYPE" = "image" ]; then
     echo ""
 fi
 
-# Step 1: Set up port-forward to Keycloak
-echo "Step 1: Setting up port-forward to Keycloak..."
-if lsof -Pi :$KEYCLOAK_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "✓ Port $KEYCLOAK_PORT is already in use (assuming Keycloak is accessible)"
+# Step 1: Verify Keycloak is accessible
+echo "Step 1: Verifying Keycloak is accessible at $KEYCLOAK_API..."
+if curl -s --max-time 5 $KEYCLOAK_API/health >/dev/null 2>&1; then
+    echo "✓ Keycloak is accessible"
 else
-    echo "Starting port-forward to keycloak on port $KEYCLOAK_PORT..."
-    kubectl port-forward -n keycloak svc/keycloak-service $KEYCLOAK_PORT:8080 >/dev/null 2>&1 &
-    KEYCLOAK_PF_PID=$!
-    sleep 2
+    echo "Warning: Could not verify Keycloak accessibility, continuing anyway..."
 fi
 
 echo ""
@@ -288,7 +283,7 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     
     if [ -n "$KAGENTI_PASSWORD" ]; then
         # Test if the fetched password works
-        TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
             -d "password=$KAGENTI_PASSWORD" \
@@ -305,7 +300,7 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
         fi
     else
         # Fallback: test if default password works
-        TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
             -d "password=admin" \
@@ -360,7 +355,7 @@ echo ""
 
 # Step 2.5: Verify Keycloak password works now that Direct Access Grants is enabled
 echo "Step 2.5: Verifying Keycloak authentication..."
-TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
@@ -408,33 +403,10 @@ echo ""
 
 # Step 4: Set up port-forward to Kagenti backend
 echo "Step 4: Setting up port-forward to Kagenti backend..."
-if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
+if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+    echo "✓ Kagenti backend is accessible"
 else
-    # Kill any stale port-forward that has the port open but isn't working
-    if lsof -Pi :$KAGENTI_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
-        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
-        sleep 1
-    fi
-
-    echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
-    kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
-    PORT_FORWARD_PID=$!
-
-    echo "Waiting for port-forward to be ready..."
-    for i in {1..10}; do
-        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-            echo "✓ Port-forward is ready"
-            break
-        fi
-        if [ $i -eq 10 ]; then
-            echo "Error: Port-forward failed to become ready"
-            kill $PORT_FORWARD_PID 2>/dev/null || true
-            exit 1
-        fi
-        sleep 1
-    done
+    echo "Warning: Could not verify Kagenti backend accessibility, continuing anyway..."
 fi
 
 echo ""
@@ -446,8 +418,7 @@ DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete
 
 if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Agent deleted or did not exist (HTTP $DELETE_RESPONSE)"
@@ -727,8 +698,7 @@ echo ""
 
 if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Agent deployment successful"
