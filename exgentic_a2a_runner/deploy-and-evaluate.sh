@@ -207,7 +207,15 @@ echo "=========================================="
 
 if [ "$DRY_RUN" = "true" ]; then
     echo "[DRY RUN] Would execute:"
-    echo "$SCRIPT_DIR/deploy-benchmark.sh --benchmark $BENCHMARK_NAME --model $MODEL_NAME --keycloak-user $KEYCLOAK_USERNAME --keycloak-pass $KEYCLOAK_PASSWORD $MCP_GATEWAY_FLAG $LOCAL_IMAGE_FLAG"
+    BENCHMARK_CMD_DISPLAY=$(printf '%q ' \
+        "$SCRIPT_DIR/deploy-benchmark.sh" \
+        --benchmark "$BENCHMARK_NAME" \
+        --model "$MODEL_NAME" \
+        --keycloak-user "$KEYCLOAK_USERNAME" \
+        --keycloak-pass "$KEYCLOAK_PASSWORD")
+    [ -n "$MCP_GATEWAY_FLAG" ] && BENCHMARK_CMD_DISPLAY="$BENCHMARK_CMD_DISPLAY$(printf '%q ' "$MCP_GATEWAY_FLAG")"
+    [ -n "$LOCAL_IMAGE_FLAG" ] && BENCHMARK_CMD_DISPLAY="$BENCHMARK_CMD_DISPLAY$(printf '%q ' "$LOCAL_IMAGE_FLAG")"
+    echo "$BENCHMARK_CMD_DISPLAY"
     echo ""
 else
     "$SCRIPT_DIR/deploy-benchmark.sh" --benchmark "$BENCHMARK_NAME" \
@@ -234,9 +242,17 @@ echo "=========================================="
 
 if [ "$DRY_RUN" = "true" ]; then
     echo "[DRY RUN] Would execute:"
-    AGENT_CMD_DISPLAY="$SCRIPT_DIR/deploy-agent.sh --benchmark $BENCHMARK_NAME --agent $AGENT_NAME --model $MODEL_NAME --keycloak-user $KEYCLOAK_USERNAME --keycloak-pass $KEYCLOAK_PASSWORD $MCP_GATEWAY_FLAG $LOCAL_IMAGE_FLAG"
+    AGENT_CMD_DISPLAY=$(printf '%q ' \
+        "$SCRIPT_DIR/deploy-agent.sh" \
+        --benchmark "$BENCHMARK_NAME" \
+        --agent "$AGENT_NAME" \
+        --model "$MODEL_NAME" \
+        --keycloak-user "$KEYCLOAK_USERNAME" \
+        --keycloak-pass "$KEYCLOAK_PASSWORD")
+    [ -n "$MCP_GATEWAY_FLAG" ] && AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY$(printf '%q ' "$MCP_GATEWAY_FLAG")"
+    [ -n "$LOCAL_IMAGE_FLAG" ] && AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY$(printf '%q ' "$LOCAL_IMAGE_FLAG")"
     if [ ${#PLUGIN_FLAGS[@]} -gt 0 ]; then
-        AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY ${PLUGIN_FLAGS[*]}"
+        AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY$(printf '%q ' "${PLUGIN_FLAGS[@]}")"
     fi
     echo "$AGENT_CMD_DISPLAY"
     echo ""
@@ -266,12 +282,16 @@ echo "=========================================="
 
 if [ "$DRY_RUN" = "true" ]; then
     echo "[DRY RUN] Would execute:"
-    EVALUATE_CMD_DISPLAY="$SCRIPT_DIR/evaluate-benchmark.sh --benchmark $BENCHMARK_NAME --agent $AGENT_NAME --experiment $EXPERIMENT_NAME"
+    EVALUATE_CMD_DISPLAY=$(printf '%q ' \
+        "$SCRIPT_DIR/evaluate-benchmark.sh" \
+        --benchmark "$BENCHMARK_NAME" \
+        --agent "$AGENT_NAME" \
+        --experiment "$EXPERIMENT_NAME")
     if [ "$MLFLOW_ENABLED" = "true" ]; then
-        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY --mlflow"
+        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --mlflow)"
     fi
     if [ "$USE_MCP_GATEWAY" = "true" ]; then
-        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY --use-mcp-gateway"
+        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --use-mcp-gateway)"
     fi
     echo "$EVALUATE_CMD_DISPLAY"
     echo ""

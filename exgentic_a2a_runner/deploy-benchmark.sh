@@ -205,10 +205,20 @@ echo ""
 
 # Step 3: Verify Keycloak is accessible
 echo "Step 3: Verifying Keycloak is accessible at $KEYCLOAK_API..."
-if curl -s --max-time 5 $KEYCLOAK_API/health >/dev/null 2>&1; then
-    echo "✓ Keycloak is accessible"
-else
-    echo "Warning: Could not verify Keycloak accessibility, continuing anyway..."
+KEYCLOAK_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KEYCLOAK_API/health" >/dev/null 2>&1; then
+        echo "✓ Keycloak is accessible"
+        KEYCLOAK_REACHABLE=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "$KEYCLOAK_REACHABLE" = false ]; then
+    echo "Error: Keycloak is not accessible at $KEYCLOAK_API after 10s"
+    echo "Please ensure Keycloak is running and reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
@@ -315,14 +325,22 @@ echo "✓ Successfully obtained authentication token"
 
 echo ""
 
-# Step 6: Set up port-forward to Kagenti backend
-echo "Step 6: Setting up port-forward to Kagenti backend..."
+# Step 6: Verify Kagenti backend is accessible
+echo "Step 6: Verifying Kagenti backend accessibility at $KAGENTI_API..."
+KAGENTI_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+        echo "✓ Kagenti backend is accessible"
+        KAGENTI_REACHABLE=true
+        break
+    fi
+    sleep 1
+done
 
-# Check if Kagenti API is accessible
-if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-    echo "✓ Kagenti backend is accessible"
-else
-    echo "Warning: Could not verify Kagenti backend accessibility, continuing anyway..."
+if [ "$KAGENTI_REACHABLE" = false ]; then
+    echo "Error: Kagenti backend is not accessible at $KAGENTI_API after 10s"
+    echo "Please ensure Kagenti backend is reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
