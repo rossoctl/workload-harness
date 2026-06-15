@@ -1,4 +1,6 @@
-# Agent Guidelines for Bob
+# Agent Guidelines
+
+These guidelines apply to all AI coding agents working in this repository (e.g. Bob, Claude).
 
 ## Git Commit Guidelines
 
@@ -13,7 +15,7 @@ git commit -s -m "fix: resolve issue with deployment"
 # Wrong - do not manually add Signed-off-by
 git commit -m "fix: resolve issue
 
-Signed-off-by: Bob <bob@example.com>"
+Signed-off-by: Your Name <you@example.com>"
 ```
 
 The `-s` flag automatically adds the proper DCO sign-off trailer based on the git configuration.
