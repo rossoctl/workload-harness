@@ -9,7 +9,7 @@ The current `exgentic_a2a_runner` deploy scripts treat AuthBridge as two opaque 
   - `inbound:  [a2a-parser, jwt-validation]`
   - `outbound: [token-exchange, inference-parser, mcp-parser, ibac]`
 
-This was correct when IBAC was the only knob workload-harness needed. AuthBridge has since moved to a **generic plugin pipeline** (`AuthBridge/docs/framework-architecture.md`, `plugin-reference.md`) where every component — `jwt-validation`, `token-exchange`, `token-broker`, `a2a-parser`, `mcp-parser`, `inference-parser`, `ibac` — is independently composable, configured under its own `config:` block, and gated by an `on_error` policy (`enforce` / `observe` / `off`). The current scripts can't express:
+This was correct when IBAC was the only knob workload-harness needed. AuthBridge has since moved to a **generic plugin pipeline** (`authbridge/docs/framework-architecture.md`, `plugin-reference.md`) where every component — `jwt-validation`, `token-exchange`, `token-broker`, `a2a-parser`, `mcp-parser`, `inference-parser`, `ibac` — is independently composable, configured under its own `config:` block, and gated by an `on_error` policy (`enforce` / `observe` / `off`). The current scripts can't express:
 
 - IBAC without token-exchange, or token-exchange without IBAC parsers.
 - Token-broker (newer plugin) instead of token-exchange.
