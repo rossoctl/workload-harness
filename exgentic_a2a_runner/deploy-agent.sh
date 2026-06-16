@@ -40,6 +40,7 @@ KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
+USE_LOCAL_IMAGE="false"
 
 # AuthBridge plugin pipeline composition. See AUTHBRIDGE_PIPELINE_SPEC.md.
 # PIPELINE_PRESET is set by --plugin-preset; PIPELINE_SELECTORS accumulates
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --local-image)
+            USE_LOCAL_IMAGE="true"
+            shift
+            ;;
         --plugin)
             PIPELINE_SELECTORS+=("+$2")
             shift 2
@@ -104,6 +109,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
+            echo "  --local-image              Use locally built image instead of pulling from registry (image deployments only)"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -167,19 +173,22 @@ else
     # Replace underscores with hyphens for Kubernetes compatibility
     AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
     AGENT_NAME="${AGENT_NAME//_/-}"
-    # Image name keeps underscores (container images allow them)
-    IMAGE_NAME="localhost/${FULL_AGENT_NAME}:latest"
-    # Split image name and tag for API
+    
+    # Default to Exgentic registry, can be overridden with environment variable
+    EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
+    IMAGE_TAG="${IMAGE_TAG:-latest}"
+    REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
+    LOCAL_IMAGE_NAME="localhost/${FULL_AGENT_NAME}:latest"
+    
+    # Will be set after image pull/check
+    IMAGE_NAME="$LOCAL_IMAGE_NAME"
     IMAGE_NAME_WITHOUT_TAG="localhost/${FULL_AGENT_NAME}"
-    IMAGE_TAG="latest"
 fi
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
-KAGENTI_API="http://localhost:8001"
-KAGENTI_PORT=8001
-KEYCLOAK_API="http://localhost:8002"
-KEYCLOAK_PORT=8002
+KAGENTI_API="http://kagenti-api.localtest.me:8080"
+KEYCLOAK_API="http://keycloak.localtest.me:8080"
 
 echo "=========================================="
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -192,9 +201,9 @@ echo "Model: $MODEL_NAME"
 echo "=========================================="
 echo ""
 
-# Step 0: If deploying from image, check and sync image
+# Step 0: If deploying from image, get and sync image
 if [ "$DEPLOYMENT_TYPE" = "image" ]; then
-    echo "Step 0: Checking for local image and syncing if needed..."
+    echo "Step 0: Setting up container image..."
     
     # Determine container runtime
     if command -v podman &> /dev/null; then
@@ -208,14 +217,42 @@ if [ "$DEPLOYMENT_TYPE" = "image" ]; then
     
     echo "Using container runtime: $CONTAINER_CMD"
     
-    # Check if image exists locally
-    if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo "Error: Image $IMAGE_NAME not found locally"
-        echo "Please build the image first"
-        exit 1
+    if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+        # Force use of local image
+        echo "Using local image (--local-image flag set): $LOCAL_IMAGE_NAME"
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        
+        if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "Error: Local image $IMAGE_NAME not found"
+            echo "Please build the image first"
+            exit 1
+        fi
+        
+        echo "✓ Local image found: $IMAGE_NAME"
+    else
+        # Try to use remote image from Exgentic registry first
+        echo "Attempting to pull image from Exgentic registry: $REMOTE_IMAGE_NAME"
+        
+        if $CONTAINER_CMD pull "$REMOTE_IMAGE_NAME" ; then
+            echo "✓ Successfully pulled image from Exgentic registry"
+            # Tag it as localhost for kind compatibility
+            $CONTAINER_CMD tag "$REMOTE_IMAGE_NAME" "$LOCAL_IMAGE_NAME"
+            IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        else
+            echo "Warning: Could not pull from Exgentic registry, checking for local image..."
+            IMAGE_NAME="$LOCAL_IMAGE_NAME"
+            
+            if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+                echo "Error: Image $IMAGE_NAME not found locally and could not pull from registry"
+                echo "Please either:"
+                echo "  1. Build the image locally and use --local-image flag, or"
+                echo "  2. Ensure you have access to $REMOTE_IMAGE_NAME"
+                exit 1
+            fi
+            
+            echo "✓ Using local image: $IMAGE_NAME"
+        fi
     fi
-    
-    echo "✓ Image $IMAGE_NAME found locally"
     
     # Check if kind is available
     if ! command -v kind &> /dev/null; then
@@ -266,15 +303,22 @@ if [ "$DEPLOYMENT_TYPE" = "image" ]; then
     echo ""
 fi
 
-# Step 1: Set up port-forward to Keycloak
-echo "Step 1: Setting up port-forward to Keycloak..."
-if lsof -Pi :$KEYCLOAK_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "✓ Port $KEYCLOAK_PORT is already in use (assuming Keycloak is accessible)"
-else
-    echo "Starting port-forward to keycloak on port $KEYCLOAK_PORT..."
-    kubectl port-forward -n keycloak svc/keycloak-service $KEYCLOAK_PORT:8080 >/dev/null 2>&1 &
-    KEYCLOAK_PF_PID=$!
-    sleep 2
+# Step 1: Verify Keycloak is accessible
+echo "Step 1: Verifying Keycloak is accessible at $KEYCLOAK_API..."
+KEYCLOAK_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KEYCLOAK_API/health" >/dev/null 2>&1; then
+        echo "✓ Keycloak is accessible"
+        KEYCLOAK_REACHABLE=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "$KEYCLOAK_REACHABLE" = false ]; then
+    echo "Error: Keycloak is not accessible at $KEYCLOAK_API after 10s"
+    echo "Please ensure Keycloak is running and reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
@@ -288,7 +332,7 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     
     if [ -n "$KAGENTI_PASSWORD" ]; then
         # Test if the fetched password works
-        TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
             -d "password=$KAGENTI_PASSWORD" \
@@ -305,7 +349,7 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
         fi
     else
         # Fallback: test if default password works
-        TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
             -d "password=admin" \
@@ -360,7 +404,7 @@ echo ""
 
 # Step 2.5: Verify Keycloak password works now that Direct Access Grants is enabled
 echo "Step 2.5: Verifying Keycloak authentication..."
-TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
@@ -406,35 +450,22 @@ echo "✓ Successfully obtained authentication token"
 
 echo ""
 
-# Step 4: Set up port-forward to Kagenti backend
-echo "Step 4: Setting up port-forward to Kagenti backend..."
-if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
-else
-    # Kill any stale port-forward that has the port open but isn't working
-    if lsof -Pi :$KAGENTI_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
-        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
-        sleep 1
+# Step 4: Verify Kagenti backend is accessible
+echo "Step 4: Verifying Kagenti backend accessibility at $KAGENTI_API..."
+KAGENTI_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+        echo "✓ Kagenti backend is accessible"
+        KAGENTI_REACHABLE=true
+        break
     fi
+    sleep 1
+done
 
-    echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
-    kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
-    PORT_FORWARD_PID=$!
-
-    echo "Waiting for port-forward to be ready..."
-    for i in {1..10}; do
-        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-            echo "✓ Port-forward is ready"
-            break
-        fi
-        if [ $i -eq 10 ]; then
-            echo "Error: Port-forward failed to become ready"
-            kill $PORT_FORWARD_PID 2>/dev/null || true
-            exit 1
-        fi
-        sleep 1
-    done
+if [ "$KAGENTI_REACHABLE" = false ]; then
+    echo "Error: Kagenti backend is not accessible at $KAGENTI_API after 10s"
+    echo "Please ensure Kagenti backend is reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
@@ -446,8 +477,7 @@ DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete
 
 if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Agent deleted or did not exist (HTTP $DELETE_RESPONSE)"
@@ -504,7 +534,9 @@ if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_URL="http://mcp-gateway-istio.gateway-system.svc.cluster.local:8080/mcp"
     echo "Using MCP Gateway URL: $MCP_URL"
 else
-    MCP_URL="http://${TOOL_NAME}-mcp:8000/mcp"
+    # Use internal Kubernetes service DNS for cluster communication
+    MCP_URL="http://${TOOL_NAME}-mcp.${NAMESPACE}.svc.cluster.local:8000/mcp"
+    echo "Using MCP internal service URL: $MCP_URL"
 fi
 
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -670,7 +702,7 @@ if [ "$DEPLOYMENT_TYPE" = "source" ]; then
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
@@ -700,7 +732,7 @@ else
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
   "spireEnabled": false
 }
@@ -725,8 +757,7 @@ echo ""
 
 if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Agent deployment successful"
@@ -888,61 +919,48 @@ fi
 # Step 12: Test agent card access
 echo "Step 12: Testing agent card access..."
 
-# Check if service exists
-if ! kubectl get svc $AGENT_NAME -n $NAMESPACE >/dev/null 2>&1; then
-    echo "⚠ Service $AGENT_NAME not found, skipping card test"
-else
-    # Set up port-forward to agent
-    AGENT_PORT=8084
+
+# Use HTTP route endpoint instead of port-forward
+AGENT_HTTP_ROUTE_URL="http://${AGENT_NAME}.${NAMESPACE}.localtest.me:8080"
+
+echo "Using HTTP route URL: $AGENT_HTTP_ROUTE_URL"
+
+# Wait for HTTP route to be ready (up to 60s)
+CARD_RESPONSE=""
+HTTP_CODE=""
+for i in $(seq 1 60); do
+    HTTP_CODE=$(curl -s -o /tmp/agent_card_response.txt -w "%{http_code}" --max-time 3 "${AGENT_HTTP_ROUTE_URL}/.well-known/agent-card.json" 2>/dev/null) || true
+    CARD_RESPONSE=$(cat /tmp/agent_card_response.txt 2>/dev/null || echo "")
     
-    # Check if port is already in use
-    if nc -z localhost $AGENT_PORT 2>/dev/null; then
-        echo "⚠ Port $AGENT_PORT already in use, skipping card test"
-    else
-        # Retry until agent responds (up to 60s)
-        # After a rollout, the new pod's endpoint may not be registered yet,
-        # causing port-forward to exit immediately. Restart it on each attempt.
-        CARD_RESPONSE=""
-        AGENT_PF_PID=""
-        for i in $(seq 1 60); do
-            # (Re)start port-forward if it's not running
-            if [ -z "$AGENT_PF_PID" ] || ! kill -0 $AGENT_PF_PID 2>/dev/null; then
-                [ -n "$AGENT_PF_PID" ] && { kill $AGENT_PF_PID 2>/dev/null || true; wait $AGENT_PF_PID 2>/dev/null || true; }
-                kubectl port-forward -n $NAMESPACE svc/$AGENT_NAME $AGENT_PORT:8080 >/dev/null 2>&1 &
-                AGENT_PF_PID=$!
-                sleep 2
-            fi
-
-            CARD_RESPONSE=$(curl -s --max-time 3 http://localhost:$AGENT_PORT/.well-known/agent-card.json 2>/dev/null) || true
-            if [ -n "$CARD_RESPONSE" ]; then
-                break
-            fi
-            if [ $((i % 10)) -eq 0 ]; then
-                echo "  Waiting for agent to be ready... (${i}s)"
-            fi
-            sleep 1
-        done
-
-        # Always clean up port-forward
-        if [ -n "$AGENT_PF_PID" ]; then
-            kill $AGENT_PF_PID 2>/dev/null || true
-            wait $AGENT_PF_PID 2>/dev/null || true
+    # Check for successful response (HTTP 200) and valid JSON
+    if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
+        break
+    fi
+    
+    # Check for gateway errors
+    if echo "$CARD_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
+        if [ $((i % 10)) -eq 0 ]; then
+            echo "  Gateway error (backend not ready yet)... (${i}s)"
         fi
+    elif [ $((i % 10)) -eq 0 ]; then
+        echo "  Waiting for agent to be ready... (${i}s)"
+    fi
+    sleep 1
+done
 
-            if [ -z "$CARD_RESPONSE" ]; then
-                echo "⚠ No response from agent card endpoint after 60s"
-                echo "  Agent is deployed and running, but card endpoint did not respond"
-            else
-                # Check if response contains error
-                if echo "$CARD_RESPONSE" | grep -q '"error"'; then
-                    echo "⚠ Agent responded with error:"
-                    echo "$CARD_RESPONSE" | jq '.' 2>/dev/null || echo "$CARD_RESPONSE"
-                else
-                    echo "✓ Agent card access successful:"
-                    echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "$CARD_RESPONSE"
-                fi
-            fi
-        fi
+if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
+    echo "✓ Agent card access successful:"
+    echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "$CARD_RESPONSE"
+else
+    echo "✗ Agent card endpoint not accessible after 60s"
+    echo "  HTTP Code: $HTTP_CODE"
+    if [ -n "$CARD_RESPONSE" ]; then
+        echo "  Response: $CARD_RESPONSE"
+    fi
+    echo "  Agent is deployed and running, but HTTP route may not be fully configured"
+    echo ""
+    echo "Deployment failed: Agent card endpoint not accessible"
+    exit 1
 fi
 
 echo ""
