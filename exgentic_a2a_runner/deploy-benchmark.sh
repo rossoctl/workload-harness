@@ -13,6 +13,7 @@ KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="unknown"
 BENCHMARK_NAME=""
 USE_MCP_GATEWAY="false"
+USE_LOCAL_IMAGE="false"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --local-image)
+            USE_LOCAL_IMAGE="true"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> [OPTIONS]"
             echo ""
@@ -48,6 +53,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Register MCP server with the MCP Gateway"
+            echo "  --local-image              Use locally built image instead of pulling from registry"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini"
             echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin"
             echo "  $0 --benchmark tau2 --use-mcp-gateway"
+            echo "  $0 --benchmark gsm8k --local-image"
             exit 0
             ;;
         -*)
@@ -77,13 +84,15 @@ if [ -z "$BENCHMARK_NAME" ]; then
     exit 1
 fi
 
-IMAGE_NAME="localhost/exgentic-mcp-${BENCHMARK_NAME}:latest"
+# Default to Exgentic registry, can be overridden with environment variable
+EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/exgentic-mcp-${BENCHMARK_NAME}:${IMAGE_TAG}"
+LOCAL_IMAGE_NAME="localhost/exgentic-mcp-${BENCHMARK_NAME}:latest"
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
-KAGENTI_API="http://localhost:8001"  # Using 8001 to avoid conflict with MCP server on 8000
-KAGENTI_PORT=8001
-KEYCLOAK_API="http://localhost:8002"
-KEYCLOAK_PORT=8002
+KAGENTI_API="http://kagenti-api.localtest.me:8080"
+KEYCLOAK_API="http://keycloak.localtest.me:8080"
 
 echo "=========================================="
 echo "Deploying Exgentic Benchmark: $BENCHMARK_NAME"
@@ -91,8 +100,8 @@ echo "=========================================="
 echo "Model: $MODEL_NAME"
 echo ""
 
-# Step 1: Check if image exists locally
-echo "Step 1: Checking for local image..."
+# Step 1: Determine container runtime and get image
+echo "Step 1: Setting up container image..."
 if command -v podman &> /dev/null; then
     CONTAINER_CMD="podman"
 elif command -v docker &> /dev/null; then
@@ -104,13 +113,44 @@ fi
 
 echo "Using container runtime: $CONTAINER_CMD"
 
-if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-    echo "Error: Image $IMAGE_NAME not found locally"
-    echo "Please build the image first"
-    exit 1
+if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+    # Force use of local image
+    echo "Using local image (--local-image flag set): $LOCAL_IMAGE_NAME"
+    IMAGE_NAME="$LOCAL_IMAGE_NAME"
+    
+    if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+        echo "Error: Local image $IMAGE_NAME not found"
+        echo "Please build the image first"
+        exit 1
+    fi
+    
+    echo "✓ Local image found: $IMAGE_NAME"
+else
+    # Try to use remote image from Exgentic registry first
+    IMAGE_NAME="$REMOTE_IMAGE_NAME"
+    echo "Attempting to pull image from Exgentic registry: $REMOTE_IMAGE_NAME"
+    
+    if $CONTAINER_CMD pull "$REMOTE_IMAGE_NAME" ; then
+        echo "✓ Successfully pulled image from Exgentic registry"
+        # Tag it as localhost for kind compatibility
+        $CONTAINER_CMD tag "$REMOTE_IMAGE_NAME" "$LOCAL_IMAGE_NAME"
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+    else
+        echo "Warning: Could not pull from Exgentic registry, checking for local image..."
+        IMAGE_NAME="$LOCAL_IMAGE_NAME"
+        
+        if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
+            echo "Error: Image $IMAGE_NAME not found locally and could not pull from registry"
+            echo "Please either:"
+            echo "  1. Build the image locally and use --local-image flag, or"
+            echo "  2. Ensure you have access to $REMOTE_IMAGE_NAME"
+            exit 1
+        fi
+        
+        echo "✓ Using local image: $IMAGE_NAME"
+    fi
 fi
 
-echo "✓ Image $IMAGE_NAME found locally"
 echo ""
 
 # Step 2: Check if image needs syncing
@@ -163,29 +203,22 @@ fi
 
 echo ""
 
-# Step 3: Setting up port-forward to Keycloak...
-echo "Step 3: Setting up port-forward to Keycloak..."
+# Step 3: Verify Keycloak is accessible
+echo "Step 3: Verifying Keycloak is accessible at $KEYCLOAK_API..."
+KEYCLOAK_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KEYCLOAK_API/health" >/dev/null 2>&1; then
+        echo "✓ Keycloak is accessible"
+        KEYCLOAK_REACHABLE=true
+        break
+    fi
+    sleep 1
+done
 
-# Check if port-forward is already running
-if nc -z localhost $KEYCLOAK_PORT 2>/dev/null; then
-    echo "✓ Port $KEYCLOAK_PORT is already in use (assuming Keycloak is accessible)"
-else
-    echo "Starting port-forward to keycloak on port $KEYCLOAK_PORT..."
-    kubectl port-forward -n keycloak svc/keycloak-service $KEYCLOAK_PORT:8080 >/dev/null 2>&1 &
-    KEYCLOAK_PF_PID=$!
-    
-    # Wait for port-forward to be ready
-    echo "Waiting for Keycloak port-forward to be ready..."
-    for i in {1..10}; do
-        if curl -s $KEYCLOAK_API/health >/dev/null 2>&1; then
-            echo "✓ Keycloak port-forward is ready"
-            break
-        fi
-        if [ $i -eq 10 ]; then
-            echo "Warning: Keycloak port-forward may not be ready, continuing anyway..."
-        fi
-        sleep 1
-    done
+if [ "$KEYCLOAK_REACHABLE" = false ]; then
+    echo "Error: Keycloak is not accessible at $KEYCLOAK_API after 10s"
+    echo "Please ensure Keycloak is running and reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
@@ -243,7 +276,7 @@ echo ""
 
 # Step 4.5: Verify Keycloak password works now that Direct Access Grants is enabled
 echo "Step 4.5: Verifying Keycloak authentication..."
-TEST_AUTH=$(curl -s -X POST "http://localhost:$KEYCLOAK_PORT/realms/kagenti/protocol/openid-connect/token" \
+TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
@@ -292,38 +325,22 @@ echo "✓ Successfully obtained authentication token"
 
 echo ""
 
-# Step 6: Set up port-forward to Kagenti backend
-echo "Step 6: Setting up port-forward to Kagenti backend..."
-
-# Check if Kagenti API is actually responding (not just port open)
-if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-    echo "✓ Kagenti backend is already accessible on port $KAGENTI_PORT"
-else
-    # Kill any stale port-forward that has the port open but isn't working
-    if nc -z localhost $KAGENTI_PORT 2>/dev/null; then
-        echo "Port $KAGENTI_PORT is open but API not responding, restarting port-forward..."
-        lsof -ti :$KAGENTI_PORT | xargs kill 2>/dev/null || true
-        sleep 1
+# Step 6: Verify Kagenti backend is accessible
+echo "Step 6: Verifying Kagenti backend accessibility at $KAGENTI_API..."
+KAGENTI_REACHABLE=false
+for i in $(seq 1 10); do
+    if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
+        echo "✓ Kagenti backend is accessible"
+        KAGENTI_REACHABLE=true
+        break
     fi
+    sleep 1
+done
 
-    echo "Starting port-forward to kagenti-backend on port $KAGENTI_PORT..."
-    kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000 >/dev/null 2>&1 &
-    PORT_FORWARD_PID=$!
-
-    # Wait for port-forward to be ready
-    echo "Waiting for port-forward to be ready..."
-    for i in {1..10}; do
-        if curl -s --max-time 3 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-            echo "✓ Port-forward is ready"
-            break
-        fi
-        if [ $i -eq 10 ]; then
-            echo "Error: Port-forward failed to become ready"
-            kill $PORT_FORWARD_PID 2>/dev/null || true
-            exit 1
-        fi
-        sleep 1
-    done
+if [ "$KAGENTI_REACHABLE" = false ]; then
+    echo "Error: Kagenti backend is not accessible at $KAGENTI_API after 10s"
+    echo "Please ensure Kagenti backend is reachable via HTTP route"
+    exit 1
 fi
 
 echo ""
@@ -335,8 +352,7 @@ DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete
 
 if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Tool deleted or did not exist (HTTP $DELETE_RESPONSE)"
@@ -500,7 +516,7 @@ TOOL_JSON=$(cat <<EOF
       "protocol": "TCP"
     }
   ],
-  "createHttpRoute": false,
+  "createHttpRoute": true,
   "authBridgeEnabled": false,
   "spireEnabled": false
 }
@@ -526,8 +542,7 @@ echo ""
 # Check if deployment was successful
 if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
     echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure the port-forward to kagenti-backend is running:"
-    echo "  kubectl port-forward -n kagenti-system svc/kagenti-backend $KAGENTI_PORT:8000"
+    echo "Please ensure Kagenti backend is accessible via HTTP route"
     exit 1
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Tool deployment successful"
@@ -598,10 +613,6 @@ fi
 echo ""
 
 # Step 12: Update openai-secret and set memory limit
-echo "=========================================="
-echo "Final Configuration"
-echo "=========================================="
-echo ""
 
 # Step 12.1: Set resource limits
 echo "Step 12.1: Setting resource limits..."
@@ -625,66 +636,48 @@ echo ""
 echo "Step 13: Performing MCP server health check..."
 echo ""
 
-MCP_HEALTH_PORT=8009
-MCP_API="http://localhost:$MCP_HEALTH_PORT"
-# Kagenti appends -mcp to the service name
-MCP_SVC_NAME="${TOOL_NAME}-mcp"
+# Use HTTP route endpoint instead of port-forward
+MCP_HTTP_ROUTE_URL="http://${TOOL_NAME}.${NAMESPACE}.localtest.me:8080"
+MCP_API="$MCP_HTTP_ROUTE_URL"
 
-# Verify the service exists
-if ! kubectl get svc "$MCP_SVC_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo "⚠ Service $MCP_SVC_NAME not found, trying $TOOL_NAME..."
-    MCP_SVC_NAME="$TOOL_NAME"
-    if ! kubectl get svc "$MCP_SVC_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-        echo "⚠ Service $MCP_SVC_NAME not found either, skipping health check"
-        MCP_SVC_NAME=""
+echo "Using HTTP route URL: $MCP_HTTP_ROUTE_URL"
+
+# Wait for HTTP route to be ready (up to 60s)
+HEALTH_CHECK_PASSED=false
+for i in $(seq 1 60); do
+    # Health check: POST an MCP initialize request to /mcp
+    MCP_HTTP_CODE=$(curl -s -o /tmp/mcp_health_response.txt -w "%{http_code}" --max-time 3 \
+        -X POST "$MCP_API/mcp" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" \
+        -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}}}' \
+        2>/dev/null) || true
+    
+    MCP_RESPONSE=$(cat /tmp/mcp_health_response.txt 2>/dev/null || echo "")
+
+    if [ "$MCP_HTTP_CODE" = "200" ]; then
+        echo "✓ MCP server health check passed (HTTP 200 on /mcp)"
+        HEALTH_CHECK_PASSED=true
+        break
     fi
-fi
-
-if [ -n "$MCP_SVC_NAME" ]; then
-    # Retry with port-forward restart (up to 60s)
-    # After a rollout the port-forward may die if the pod endpoint isn't registered yet
-    echo "Starting port-forward to $MCP_SVC_NAME on port $MCP_HEALTH_PORT..."
-    MCP_PF_PID=""
-    HEALTH_CHECK_PASSED=false
-    for i in $(seq 1 60); do
-        # (Re)start port-forward if not running
-        if [ -z "$MCP_PF_PID" ] || ! kill -0 $MCP_PF_PID 2>/dev/null; then
-            [ -n "$MCP_PF_PID" ] && { kill $MCP_PF_PID 2>/dev/null || true; wait $MCP_PF_PID 2>/dev/null || true; }
-            kubectl port-forward -n "$NAMESPACE" svc/"$MCP_SVC_NAME" $MCP_HEALTH_PORT:8000 >/dev/null 2>&1 &
-            MCP_PF_PID=$!
-            sleep 2
-        fi
-
-        # Health check: POST an MCP initialize request to /mcp
-        MCP_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 \
-            -X POST "$MCP_API/mcp" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json, text/event-stream" \
-            -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}}}' \
-            2>/dev/null) || true
-
-        if [ "$MCP_HTTP_CODE" = "200" ]; then
-            echo "✓ MCP server health check passed (HTTP 200 on /mcp)"
-            HEALTH_CHECK_PASSED=true
-            break
-        fi
-
+    
+    # Check for gateway errors
+    if echo "$MCP_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
         if [ $((i % 10)) -eq 0 ]; then
-            echo "  Waiting for MCP server to be ready... (${i}s)"
+            echo "  Gateway error (backend not ready yet)... (${i}s)"
         fi
-        sleep 1
-    done
-
-    # Clean up port-forward
-    if [ -n "$MCP_PF_PID" ]; then
-        kill $MCP_PF_PID 2>/dev/null || true
-        wait $MCP_PF_PID 2>/dev/null || true
+    elif [ $((i % 10)) -eq 0 ]; then
+        echo "  Waiting for MCP server to be ready... (${i}s)"
     fi
+    sleep 1
+done
 
-    if [ "$HEALTH_CHECK_PASSED" = false ]; then
-        echo "⚠ MCP server did not respond to health check after 60s"
-        echo "  The server may still be starting up"
+if [ "$HEALTH_CHECK_PASSED" = false ]; then
+    echo "⚠ MCP server did not respond to health check after 60s"
+    if [ -n "$MCP_RESPONSE" ]; then
+        echo "  Last response: $MCP_RESPONSE"
     fi
+    echo "  The server may still be starting up or HTTP route may not be fully configured"
 fi
 
 # Step 14: Register with MCP Gateway (conditional)
@@ -735,7 +728,7 @@ ROUTE_EOF
 
     echo "Creating MCPServerRegistration for $TOOL_NAME..."
     kubectl apply -f - <<REG_EOF
-apiVersion: mcp.kagenti.com/v1alpha1
+apiVersion: mcp.kuadrant.io/v1alpha1
 kind: MCPServerRegistration
 metadata:
   name: ${TOOL_NAME}-servers
@@ -808,7 +801,7 @@ if [ -n "$OPENAI_API_BASE" ]; then
 fi
 echo ""
 echo "To access the tool:"
-echo "  kubectl port-forward -n $NAMESPACE svc/$TOOL_NAME 8000:8000"
+echo "  HTTP Route URL: http://${TOOL_NAME}.${NAMESPACE}.localtest.me:8080"
 echo ""
 
 # Made with Bob
