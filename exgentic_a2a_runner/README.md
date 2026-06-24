@@ -10,6 +10,52 @@ A standalone Python runner that integrates Exgentic benchmarks with Kagenti agen
 - **OpenTelemetry instrumentation**: Comprehensive traces, metrics, and logs
 - **Strict failure handling**: Any error or timeout marks the session as failed
 - **Configurable via environment variables**: Easy deployment and configuration
+- **Composable AuthBridge plugin pipeline**: Per-agent selection of inbound/outbound plugins (`jwt-validation`, `token-exchange`, `a2a-parser`, `ibac`, …) with `enforce` / `observe` / `off` policies — see [AuthBridge Plugin Pipeline](#authbridge-plugin-pipeline).
+
+## Getting Started
+
+The minimal end-to-end path: stand up a Kagenti cluster, build the agent + MCP images, then deploy and evaluate. Each block here is self-contained — copy the commands you need.
+
+```bash
+# 1. Stand up the Kagenti cluster (one-time)
+git clone git@github.com:kagenti/kagenti.git
+cd kagenti
+env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all --preload-images
+cd ..
+
+# 2. Build the exgentic MCP server and agent images (one-time per benchmark/agent)
+git clone git@github.com:kagenti/agent-examples.git
+cd agent-examples
+(cd mcp/exgentic_benchmarks && ./build.sh tau2)        # or appworld, gsm8k
+(cd a2a/exgentic_agent     && ./build.sh tool_calling)
+cd ..
+
+# 3. Install the runner
+git clone git@github.com:kagenti/workload-harness.git
+cd workload-harness/exgentic_a2a_runner
+uv sync --python 3.12
+source .venv/bin/activate
+cp example.env .env   # edit as needed (OPENAI_API_KEY, IBAC tunables, etc.)
+
+# 4a. Plain run — no AuthBridge sidecar
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
+
+# 4b. Run with auth + token exchange only
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset auth-only
+
+# 4c. Run with IBAC enforcing intent-based access control
+export IBAC_JUDGE_ENDPOINT=http://host.docker.internal:11434
+export IBAC_JUDGE_MODEL=llama3.2:3b
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset ibac-only
+
+# 4d. Canary IBAC in observe mode (telemetry only, no blocking)
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset ibac-only --plugin ibac:observe
+```
+
+The deploy + evaluate steps can also be run separately — see [Usage](#usage). For full plugin pipeline mechanics, see [AuthBridge Plugin Pipeline](#authbridge-plugin-pipeline).
 
 ## Architecture
 
@@ -20,6 +66,34 @@ The runner follows this execution model for each benchmark session:
 3. **Evaluate Session**: `success = mcp_server.evaluate_session(session_id)`
 4. **Close Session**: `mcp_server.close_session(session_id)`
 5. **Record Statistics**: Track completion time, success rate, compute costs, tokens.
+
+## Benchmarks
+
+The runner currently drives three benchmarks via the Exgentic MCP server. Each is a separate MCP image (`./build.sh <name>` from `agent-examples/mcp/exgentic_benchmarks`) and is selected at deploy time with `--benchmark <name>`.
+
+| Benchmark | What it tests | Tool surface | Notes |
+|-----------|---------------|--------------|-------|
+| `gsm8k` | Grade-school math word problems — single-turn arithmetic reasoning. | Minimal — primarily LLM reasoning, light tool use. | Cheap and fast; good smoke test. The deploy script sets `EXGENTIC_SET_BENCHMARK_RUNNER=direct` for this benchmark. |
+| `tau2` | Multi-turn customer-support conversations against a simulated user. Measures whether the agent can complete realistic task flows over several turns. | Domain tools (retail, airline, telecom) plus a user-simulator LLM. | Deploy passes `EXGENTIC_SET_BENCHMARK_USER_SIMULATOR_MODEL` so the simulator runs on the same model as the agent. The IBAC plugin also lands its canonical attack-shape tests against tau-style multi-turn traffic — see [`ibac-benchmarking.md`](ibac-benchmarking.md). |
+| `appworld` | Long-horizon, tool-heavy tasks across a simulated app ecosystem (calendar, email, contacts, etc.). Stresses tool selection and planning. | Very wide — hundreds of tools across the simulated apps. | OpenAI models can't handle this tool surface without shortlisting; use `gemini-2.5-pro` or another model with strong tool selection. |
+
+### Picking a model
+
+The model name passed via `--model` (or `LLM_MODEL` / `EXGENTIC_SET_AGENT_MODEL`) is consumed by [LiteLLM](https://docs.litellm.ai/) on the agent side, so it follows LiteLLM's `<provider>/<model>` routing convention. The default is `Azure/gpt-4.1`.
+
+**OpenAI-compatible backends** (vLLM, Ollama, llama.cpp, LM Studio, custom proxies, etc.) — prefix the model name with `openai/` to force LiteLLM down its OpenAI-compatible route, and point `OPENAI_API_BASE` at your endpoint:
+
+```bash
+# Custom Azure deployment fronted by an OpenAI-compatible proxy
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --model openai/Azure/gpt-4o-mini
+
+# Local model served via vLLM/Ollama
+./deploy-agent.sh --benchmark gsm8k --agent tool_calling \
+    --model openai/llama3.1-70b-instruct
+```
+
+For `appworld`, use a model with strong tool-selection — e.g. `gemini-2.5-pro` — rather than an OpenAI-route model.
 
 ## Installation
 
@@ -36,109 +110,12 @@ The runner follows this execution model for each benchmark session:
   - Keycloak in `keycloak` namespace
   - `team1` namespace for deployments
 
-### Pipeline composition
-
-The deploy scripts compose the AuthBridge plugin pipeline by selecting
-named plugins. The sidecar is injected by the operator only when at
-least one selector is supplied — omit them all for a sidecar-free
-deployment. See [`AUTHBRIDGE_PIPELINE_SPEC.md`](AUTHBRIDGE_PIPELINE_SPEC.md)
-for the full design.
-
-#### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--plugin-preset NAME` | Named bundle. Available: `auth-only`, `ibac-only`, `full`. |
-| `--plugin NAME[:POLICY]` | Enable plugin with policy ∈ {`enforce`(default), `observe`, `off`}. Repeatable. |
-| `--no-plugin NAME` | Shorthand for `--plugin NAME:off`. Repeatable. |
-| `--plugin-config-file PATH` | Flat-map YAML overlay merged after selectors. |
-
-Selector resolution: preset seeds the set; `--plugin` / `--no-plugin`
-apply in order with last-write-wins semantics. Plugins not in the
-final set are emitted with `on_error: off` so the framework skips
-dispatch for them (this is required because the operator base config
-enables every plugin by default).
-
-#### Presets
-
-| Preset | Inbound | Outbound |
-|--------|---------|----------|
-| `auth-only` | `jwt-validation` | `token-exchange` |
-| `ibac-only` | `a2a-parser` | `inference-parser`, `mcp-parser`, `ibac` |
-| `full` | `a2a-parser`, `jwt-validation` | `token-exchange`, `inference-parser`, `mcp-parser`, `ibac` |
-
-#### `on_error` policy (canary rollout)
-
-Each plugin can run in `enforce`, `observe`, or `off`. `observe` collects
-shadow telemetry without blocking — useful for canarying IBAC before
-flipping to enforce:
-
-```bash
-./deploy-agent.sh --benchmark tau2 --agent tool_calling \
-    --plugin-preset full \
-    --plugin ibac:observe
-```
-
-#### `--plugin-config-file` format
-
-A flat YAML map keyed by plugin name; values are deep-merged into each
-plugin's `config:` block on top of the fragment defaults:
-
-```yaml
-ibac:
-  judge_model: "llama3.2:8b"
-  timeout_ms: 30000
-token-exchange:
-  default_policy: exchange
-jwt-validation:
-  bypass_paths:
-    - /healthz
-    - /metrics
-```
-
-Unknown plugin names in the file are ignored with a WARN to stderr.
-
-#### Sidecar image compatibility
-
-Every plugin you select must be compiled into the running sidecar binary.
-The merge will validate the YAML shape, but the sidecar will fail at
-Configure with `unknown plugin "<name>"` after reload if a plugin isn't
-registered:
-
-```
-reloader: reload failed  error="build: outbound: unknown plugin \"<name>\""
-```
-
-The IBAC plugin landed in `kagenti-extensions` on 2026-05-17 (PR #421);
-use sidecar image **`v0.6.0-alpha.4`** or newer when selecting `ibac`.
-The image tag is pinned in `kagenti/charts/kagenti/values.yaml`. To
-verify what's running:
-
-```bash
-kubectl -n team1 get pod -l app.kubernetes.io/name=<agent-name> \
-  -o jsonpath='{range .items[0].spec.containers[?(@.name=="authbridge")]}{.image}{"\n"}{end}'
-```
-
-> **Compatibility note.** Newer chart versions tie sidecar image
-> versions to operator versions (per-plugin config support,
-> jwt-validation field shape). When bumping the sidecar image past
-> `v0.5.0-rc.3`, confirm your kagenti-operator is recent enough —
-> older operators may emit ConfigMaps the newer sidecar can't parse.
-
-#### Troubleshooting
-
-- **`unknown plugin "<name>"`** at reload: the sidecar binary doesn't
-  have that plugin compiled in. Bump the image tag.
-- **Mutex error: `token-exchange` and `token-broker`**: both claim
-  `ClaimAuthorizationHeader`; the script rejects this before any
-  kubectl call. Disable one with `--no-plugin`.
-- **`Reads ... no earlier plugin writes it`**: parser ordering issue;
-  shouldn't happen with the canonical-position table, but possible if a
-  malformed `--plugin-config-file` introduces an unknown plugin. See
-  [`framework-architecture.md` §6](https://github.com/kagenti/kagenti-extensions/blob/main/authbridge/docs/framework-architecture.md)
-  for the underlying rules.
-- **Unknown plugin / preset name**: script-side error; valid names are
-  listed in the spec §3.1, valid presets in §3.2.
+> **AuthBridge sidecar:** the deploy scripts can attach an AuthBridge
+> sidecar with a composable plugin pipeline (auth, token exchange,
+> intent-based access control, …) to each agent. See
+> [AuthBridge Plugin Pipeline](#authbridge-plugin-pipeline) for the
+> full surface; the sidecar is only injected when you pass a plugin
+> selector.
 
 ### Install from source
 
@@ -148,7 +125,7 @@ kubectl -n team1 get pod -l app.kubernetes.io/name=<agent-name> \
 git clone git@github.com:kagenti/kagenti.git
 cd kagenti
 
-env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all
+env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all --preload-images
 
 ```
 
@@ -239,8 +216,7 @@ source .venv/bin/activate
 - `HF_TOKEN`: HuggingFace token (optional, creates hf-secret with dummy token if not set)
 - `OPENAI_API_BASE`: OpenAI API base URL (optional, added to deployment env vars)
 
-For appworld benchmark, use gemini-2.5-pro or other models, because OpenAI models cannot handle the number of tools in appworld without special tool shortlisting.
-
+For benchmark fit and model-name conventions (including the `openai/` prefix for OpenAI-compatible backends), see [Benchmarks](#benchmarks).
 
 ## MCP Gateway Support
 
@@ -274,6 +250,234 @@ USE_MCP_GATEWAY=true
 ### Tool Prefix
 
 The MCP Gateway exposes tools under a namespace prefix (default `exgentic_<benchmark_name>`). The runner reads `EXGENTIC_MCP_TOOL_PREFIX` and prepends it to every MCP tool call. When using the gateway via `evaluate-benchmark.sh`, this variable is set automatically. 
+
+## AuthBridge Plugin Pipeline
+
+The deploy scripts can attach an **AuthBridge sidecar** to each
+deployed agent. AuthBridge is a forward proxy whose behavior is
+defined by a composable pipeline of named plugins — `jwt-validation`,
+`token-exchange`, `token-broker`, `a2a-parser`, `mcp-parser`,
+`inference-parser`, `ibac` — each independently togglable and each
+running under an `on_error` policy of `enforce`, `observe`, or `off`.
+
+This replaces the older opaque `--authbridge` / `--ibac` toggles. The
+full design lives in [`AUTHBRIDGE_PIPELINE_SPEC.md`](AUTHBRIDGE_PIPELINE_SPEC.md).
+
+### Architectural implications
+
+- **The sidecar is opt-in per deploy.** With no plugin selectors, the
+  operator does not inject a sidecar at all and the agent runs as
+  before. Pass any selector (`--plugin-preset`, `--plugin`,
+  `--no-plugin`, `--plugin-config-file`) and the sidecar is injected
+  with the resolved pipeline.
+- **The pipeline mediates every request the agent sends and receives.**
+  Inbound plugins run on traffic to the agent (auth validation, A2A
+  parsing); outbound plugins run on traffic the agent makes to tools
+  and LLMs (token exchange, MCP/inference parsing, IBAC judging).
+  Adding a plugin adds a hop on that path — measure latency
+  accordingly.
+- **Plugins share a `Session` object.** Inbound plugins populate fields
+  (e.g. `a2a-parser` extracts the user's intent into `Session.Intents`)
+  that outbound plugins read (e.g. `ibac` compares each outbound action
+  against that intent). Hard runtime dependencies are encoded in the
+  framework — IBAC fails closed if `a2a-parser` didn't run.
+- **The operator's base config enables every plugin by default.** To
+  disable a plugin, the deploy overlay must explicitly emit
+  `on_error: off` for it. The script handles this — any plugin not in
+  your resolved selection is turned off in the overlay, not omitted.
+- **Selector resolution is last-write-wins.** A preset seeds the set;
+  subsequent `--plugin` / `--no-plugin` flags apply in order. This
+  makes "preset minus one plugin" or "preset, but canary IBAC" easy
+  to express on the command line.
+- **Configuration is delivered via overlay, hot-reloaded.** No operator
+  changes are required to flip the pipeline shape — the script writes
+  a merged ConfigMap and AuthBridge picks it up.
+
+### Flags
+
+These flags are accepted by `deploy-agent.sh` and forwarded by
+`deploy-and-evaluate.sh`:
+
+| Flag | Description |
+|------|-------------|
+| `--plugin-preset NAME` | Named bundle. Available: `auth-only`, `ibac-only`, `full`. |
+| `--plugin NAME[:POLICY]` | Enable plugin with policy ∈ {`enforce`(default), `observe`, `off`}. Repeatable. |
+| `--no-plugin NAME` | Shorthand for `--plugin NAME:off`. Repeatable. |
+| `--plugin-config-file PATH` | Flat-map YAML overlay merged after selectors. |
+
+### Presets
+
+| Preset | Inbound | Outbound |
+|--------|---------|----------|
+| `auth-only` | `jwt-validation` | `token-exchange` |
+| `ibac-only` | `a2a-parser` | `inference-parser`, `mcp-parser`, `ibac` |
+| `full` | `a2a-parser`, `jwt-validation` | `token-exchange`, `inference-parser`, `mcp-parser`, `ibac` |
+
+### Running with IBAC
+
+IBAC (Intent-Based Access Control) is an outbound plugin that compares
+each agent action against the user's most-recent declared intent and
+asks an LLM judge to deny requests that don't align — catching
+prompt-injection-driven exfiltration that traditional auth gates miss.
+See [`ibac-benchmarking.md`](ibac-benchmarking.md) for the full
+benchmarking profile.
+
+**Prerequisites:**
+
+- An OpenAI-compatible chat-completion endpoint for the judge (ollama,
+  OpenAI, vLLM, Azure, etc.).
+- The cluster's AuthBridge sidecar image must include the `ibac`
+  plugin. IBAC landed in `kagenti-extensions` on 2026-05-17 (PR #421);
+  use sidecar image **`v0.6.0-alpha.7`** or newer.
+
+  > **Caveat — not in the latest stable Kagenti release.** As of this
+  > writing, the IBAC plugin and the additive plugin-pipeline merge
+  > behavior the deploy scripts depend on are only available in
+  > `v0.6.0-alpha.7`, which has not yet been published in a stable
+  > Kagenti release. Installing from the official `v0.6.0` chart
+  > release pulls an older alpha that will fail with errors like
+  > `jwt-validation config: issuer is required` during pipeline
+  > apply. Until a release containing alpha.7 is cut, install Kagenti
+  > from `main`:
+  >
+  > ```bash
+  > git clone git@github.com:kagenti/kagenti.git
+  > cd kagenti  # use main, not a release tag
+  > env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all --preload-images
+  > ```
+  >
+  > To verify the sidecar image actually deployed:
+  >
+  > ```bash
+  > kubectl -n kagenti-system get cm kagenti-platform-config \
+  >   -o jsonpath='{.data.authbridge}'
+  > ```
+  >
+  > Expect `ghcr.io/kagenti/kagenti-extensions/authbridge:v0.6.0-alpha.7`
+  > or newer.
+
+**Configure the judge** in your `.env` (consumed by the IBAC plugin
+fragment via envsubst when `ibac` is in the active set):
+
+```bash
+# Judge LLM base URL — OpenAI-compatible (POST /v1/chat/completions)
+IBAC_JUDGE_ENDPOINT=http://host.docker.internal:11434
+# Judge model id served by that endpoint
+IBAC_JUDGE_MODEL=llama3.2:3b
+# Per-judge-call timeout in milliseconds
+IBAC_TIMEOUT_MS=15000
+# Hostname of the agent's own LLM endpoint (auto-derived from
+# OPENAI_API_BASE if unset). Added to the IBAC bypass list so the
+# agent's own reasoning calls aren't recursively judged.
+# IBAC_AGENT_LLM_HOST=host.docker.internal
+```
+
+**Deploy with IBAC enforcing** -- *UNTESTED* --(full pipeline — auth + parsers + IBAC):
+
+```bash
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset full
+```
+
+
+**IBAC without inbound auth** — for environments where an upstream
+gateway already terminates auth but you still want intent-based
+blocking on outbound calls:
+
+```bash
+./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset ibac-only
+```
+
+When IBAC blocks a request, the agent sees a `403 ibac.blocked` from
+the proxy and the `ibac.evaluate` span on that outbound call carries
+`verdict=deny`, `reason=blocked`, and the (truncated) intent and
+action description. See `ibac-benchmarking.md` for the full set of
+metrics IBAC emits.
+
+### Other compositions
+
+```bash
+# Auth + token exchange only (no IBAC, no parsers).
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset auth-only
+
+# Token-broker instead of token-exchange.
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --plugin-preset full \
+    --no-plugin token-exchange \
+    --plugin token-broker
+
+# Custom set without a preset.
+./deploy-agent.sh --benchmark tau2 --agent tool_calling \
+    --plugin jwt-validation --plugin token-exchange --plugin ibac
+
+# No AuthBridge sidecar at all (omit all plugin flags).
+./deploy-agent.sh --benchmark tau2 --agent tool_calling
+```
+
+### `--plugin-config-file` format
+
+A flat YAML map keyed by plugin name; values are deep-merged into each
+plugin's `config:` block on top of the fragment defaults:
+
+```yaml
+ibac:
+  judge_model: "llama3.2:8b"
+  timeout_ms: 30000
+token-exchange:
+  default_policy: exchange
+jwt-validation:
+  bypass_paths:
+    - /healthz
+    - /metrics
+```
+
+Unknown plugin names in the file are ignored with a WARN to stderr.
+
+### Sidecar image compatibility
+
+Every plugin you select must be compiled into the running sidecar
+binary. The merge validates the YAML shape, but the sidecar will fail
+at Configure with `unknown plugin "<name>"` after reload if a plugin
+isn't registered:
+
+```
+reloader: reload failed  error="build: outbound: unknown plugin \"<name>\""
+```
+
+The image tag is pinned in `kagenti/charts/kagenti/values.yaml`. To
+verify what's running:
+
+```bash
+kubectl -n team1 get pod -l app.kubernetes.io/name=<agent-name> \
+  -o jsonpath='{range .items[0].spec.containers[?(@.name=="authbridge")]}{.image}{"\n"}{end}'
+```
+
+> **Compatibility note.** Newer chart versions tie sidecar image
+> versions to operator versions (per-plugin config support,
+> jwt-validation field shape). When bumping the sidecar image past
+> `v0.5.0-rc.3`, confirm your kagenti-operator is recent enough —
+> older operators may emit ConfigMaps the newer sidecar can't parse.
+
+### Troubleshooting
+
+- **`unknown plugin "<name>"`** at reload: the sidecar binary doesn't
+  have that plugin compiled in. Bump the image tag.
+- **Mutex error: `token-exchange` and `token-broker`**: both claim
+  `ClaimAuthorizationHeader`; the script rejects this before any
+  kubectl call. Disable one with `--no-plugin`.
+- **`Reads ... no earlier plugin writes it`**: parser ordering issue;
+  shouldn't happen with the canonical-position table, but possible if a
+  malformed `--plugin-config-file` introduces an unknown plugin. See
+  [`framework-architecture.md` §6](https://github.com/kagenti/kagenti-extensions/blob/main/AuthBridge/docs/framework-architecture.md)
+  for the underlying rules.
+- **`ibac.no_intent`** in IBAC telemetry: the inbound chain is
+  misconfigured — `a2a-parser` didn't run, so `Session.Intents` is
+  empty and IBAC fails closed. Confirm `a2a-parser` is in the active
+  inbound set (it is for the `ibac-only` and `full` presets).
+- **Unknown plugin / preset name**: script-side error; valid names are
+  listed in the spec §3.1, valid presets in §3.2.
 
 ## Configuration
 
