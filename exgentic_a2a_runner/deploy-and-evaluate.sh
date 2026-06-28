@@ -288,7 +288,7 @@ else
         "${CLUSTER_FLAG[@]}" \
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
-        || fail "deploy benchmark failed"
+        || fail "Benchmark deployment failed (step 1/3)"
 
     echo ""
     echo "✓ Benchmark deployed successfully"
@@ -326,7 +326,7 @@ else
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
         "${PLUGIN_FLAGS[@]}" \
-        || fail "deploy agent failed"
+        || fail "Agent deployment failed (step 2/3)"
 
     echo ""
     echo "✓ Agent deployed successfully"
@@ -370,7 +370,7 @@ else
     fi
 
     "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}" \
-        || fail "evaluate failed"
+        || fail "Evaluation failed (step 3/3)"
 fi
 
 if [ "$DRY_RUN" = "true" ]; then
