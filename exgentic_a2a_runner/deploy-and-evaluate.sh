@@ -6,6 +6,16 @@
 
 set -e
 
+# Report which step failed, then exit. Used as `cmd || fail "..."`: the `||`
+# suppresses set -e for cmd so this message actually prints. A plain trailing
+# `if [ $? -ne 0 ]` check is dead code under set -e — the script is killed on
+# the failing line before the check ever runs.
+fail() {
+    echo ""
+    echo "Error: $1"
+    exit 1
+}
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -223,13 +233,9 @@ else
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
         $MCP_GATEWAY_FLAG \
-        $LOCAL_IMAGE_FLAG
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Benchmark deployment failed"
-        exit 1
-    fi
-    
+        $LOCAL_IMAGE_FLAG \
+        || fail "Benchmark deployment failed (step 1/3)"
+
     echo ""
     echo "✓ Benchmark deployed successfully"
     echo ""
@@ -263,13 +269,9 @@ else
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
-        "${PLUGIN_FLAGS[@]}"
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Agent deployment failed"
-        exit 1
-    fi
-    
+        "${PLUGIN_FLAGS[@]}" \
+        || fail "Agent deployment failed (step 2/3)"
+
     echo ""
     echo "✓ Agent deployed successfully"
     echo ""
@@ -304,12 +306,8 @@ else
         EVALUATE_ARGS+=(--use-mcp-gateway)
     fi
     
-    "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}"
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Evaluation failed"
-        exit 1
-    fi
+    "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}" \
+        || fail "Evaluation failed (step 3/3)"
 fi
 
 if [ "$DRY_RUN" = "true" ]; then

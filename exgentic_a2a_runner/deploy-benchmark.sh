@@ -357,8 +357,14 @@ if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Tool deleted or did not exist (HTTP $DELETE_RESPONSE)"
 else
-    echo "Warning: Delete returned HTTP $DELETE_RESPONSE"
-    cat /tmp/kagenti_delete_response.txt
+    # Any other status (e.g. 503 upstream/connection errors, 401/403) means the
+    # Kagenti API is broken or unreachable. Fail fast here rather than warn and
+    # continue into later steps that all hit the same dead backend.
+    echo "Error: Delete returned HTTP $DELETE_RESPONSE" >&2
+    echo "  Endpoint: $KAGENTI_API/api/v1/tools/$NAMESPACE/$TOOL_NAME" >&2
+    echo "  Response: $(cat /tmp/kagenti_delete_response.txt)" >&2
+    echo "  The Kagenti API is not healthy; aborting deployment." >&2
+    exit 1
 fi
 
 # Delete MCP Gateway resources if gateway mode is enabled
@@ -453,25 +459,34 @@ echo ""
 echo "Step 8: Fetching and preparing benchmark environment variables..."
 ENV_CONTENT=$(curl -s "https://raw.githubusercontent.com/yoavkatz/agent-examples/refs/heads/feature/exgentic-mcp-server/mcp/exgentic_benchmarks/.env.${BENCHMARK_NAME}")
 
+# Benchmark env vars are required: a missing .env file or an unparseable
+# parse-env response must abort the deploy, not silently continue with none.
 if [ -z "$ENV_CONTENT" ] || echo "$ENV_CONTENT" | grep -q "404: Not Found"; then
-    echo "Warning: Could not fetch .env.${BENCHMARK_NAME} file, deploying without custom env vars"
-    ENV_VARS="[]"
-else
-    # Parse env vars using the Kagenti API
-    ENV_PARSE_RESPONSE=$(curl -s -X POST "$KAGENTI_API/api/v1/agents/parse-env" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -d "{\"content\": $(echo "$ENV_CONTENT" | jq -Rs .)}")
-    
-    ENV_VARS=$(echo "$ENV_PARSE_RESPONSE" | jq '.envVars')
-    
-    if [ "$ENV_VARS" = "null" ] || [ -z "$ENV_VARS" ]; then
-        echo "Warning: Could not parse environment variables, deploying without custom env vars"
-        ENV_VARS="[]"
-    else
-        echo "✓ Environment variables parsed from .env file"
-    fi
+    echo "Error: Could not fetch .env.${BENCHMARK_NAME} file" >&2
+    echo "  URL: https://raw.githubusercontent.com/yoavkatz/agent-examples/refs/heads/feature/exgentic-mcp-server/mcp/exgentic_benchmarks/.env.${BENCHMARK_NAME}" >&2
+    echo "  The benchmark environment file is required for deployment." >&2
+    exit 1
 fi
+
+# Parse env vars using the Kagenti API
+ENV_PARSE_RESPONSE=$(curl -s -X POST "$KAGENTI_API/api/v1/agents/parse-env" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -d "{\"content\": $(echo "$ENV_CONTENT" | jq -Rs .)}")
+
+# The parse-env API can return a non-JSON body (e.g. an HTML/plain-text error
+# during backend 503s). Suppress jq's cryptic "Invalid numeric literal" so we
+# can detect the failure and report it clearly instead of letting set -e kill
+# the script on the jq line.
+ENV_VARS=$(echo "$ENV_PARSE_RESPONSE" | jq '.envVars' 2>/dev/null) || ENV_VARS="null"
+
+if [ "$ENV_VARS" = "null" ] || [ -z "$ENV_VARS" ]; then
+    echo "Error: Could not parse environment variables from parse-env API" >&2
+    echo "  Endpoint: $KAGENTI_API/api/v1/agents/parse-env" >&2
+    echo "  Response: $ENV_PARSE_RESPONSE" >&2
+    exit 1
+fi
+echo "✓ Environment variables parsed from .env file"
 
 # Add runtime configuration environment variables
 if [ -n "$OPENAI_API_BASE" ]; then
