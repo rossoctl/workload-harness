@@ -23,34 +23,27 @@ cd kagenti
 env CONTAINER_ENGINE=podman scripts/kind/setup-kagenti.sh --with-all --preload-images
 cd ..
 
-# 2. Build the exgentic MCP server and agent images (one-time per benchmark/agent)
-git clone git@github.com:kagenti/agent-examples.git
-cd agent-examples
-(cd mcp/exgentic_benchmarks && ./build.sh tau2)        # or appworld, gsm8k
-(cd a2a/exgentic_agent     && ./build.sh tool_calling)
-cd ..
-
-# 3. Install the runner
+# 2. Install the runner
 git clone git@github.com:kagenti/workload-harness.git
 cd workload-harness/exgentic_a2a_runner
 uv sync --python 3.12
 source .venv/bin/activate
 cp example.env .env   # edit as needed (OPENAI_API_KEY, IBAC tunables, etc.)
 
-# 4a. Plain run — no AuthBridge sidecar
+# 3a. Plain run — no AuthBridge sidecar
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
 
-# 4b. Run with auth + token exchange only
+# 3b. Run with auth + token exchange only
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
     --plugin-preset auth-only
 
-# 4c. Run with IBAC enforcing intent-based access control
+# 3c. Run with IBAC enforcing intent-based access control
 export IBAC_JUDGE_ENDPOINT=http://host.docker.internal:11434
 export IBAC_JUDGE_MODEL=llama3.2:3b
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
     --plugin-preset ibac-only
 
-# 4d. Canary IBAC in observe mode (telemetry only, no blocking)
+# 3d. Canary IBAC in observe mode (telemetry only, no blocking)
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling \
     --plugin-preset ibac-only --plugin ibac:observe
 ```
@@ -129,17 +122,6 @@ env CONTAINER_ENGINE=podman  scripts/kind/setup-kagenti.sh --with-all --preload-
 
 ```
 
-
-#### Clone and build exgentic mcp server and agent local images
-```bash
-git clone git@github.com:yoavkatz/agent-examples.git
-cd agent-examples
-git checkout feature/exgentic-mcp-server
-cd mcp/exgentic_benchmarks
-./build.sh tau2  # can also use appworld, gsm8k
-cd ../../a2a/exgentic_agent
-./build.sh tool_calling
-```
 
 #### Deploy agent and MCP server per benchmark
 
@@ -543,7 +525,6 @@ The `deploy-and-evaluate.sh` script provides a convenient way to deploy both the
 
 ```bash
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
-./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --mlflow
 ```
 
 This script will:
@@ -551,15 +532,12 @@ This script will:
 2. Deploy the agent
 3. Run the evaluation
 
-When `--mlflow` is supplied, it is passed through to `evaluate-benchmark.sh` to enable MLflow tracing via the OTEL Collector during the evaluation step.
+MLflow tracing via the OTEL Collector is **enabled by default**. Pass `--disable-mlflow` to skip it.
 
 **Options:**
 ```bash
-# Basic usage with defaults
+# Basic usage with defaults (MLflow tracing enabled)
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
-
-# With MLflow tracing enabled during evaluation
-./deploy-and-evaluate.sh --benchmark gsm8k --agent tool_calling --mlflow
 
 # Route MCP traffic through the MCP Gateway
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --use-mcp-gateway
@@ -570,7 +548,7 @@ When `--mlflow` is supplied, it is passed through to `evaluate-benchmark.sh` to 
 # With custom Keycloak credentials
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin
 
-# Dry run mode - print commands without executing them
+# Dry run mode - print commands without executing them 
 ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --dry
 
 # Show help
@@ -633,17 +611,17 @@ Step 3/3: Running Evaluation
 ### Running Benchmarks
 
 The `evaluate-benchmark.sh` script automatically:
-- Sets up port forwarding (MCP server on localhost:7770, A2A agent on localhost:7701)
-- Optionally port-forwards the OTEL Collector (traces → MLflow) with `--mlflow`
-- Waits for pods to be ready
-- Tests connectivity to the forwarded services
+- Uses HTTP routes to reach services (no port-forwarding for MCP/agent)
+- Port-forwards the OTEL Collector (traces → MLflow) on dev laptops — skipped in-cluster
+- Waits for services to be ready via HTTP health checks
+- Tests connectivity to services
 - Runs the benchmark evaluation
 - Propagates the current OpenTelemetry trace context into outbound A2A HTTP requests so the agent can continue the same distributed trace when it supports W3C trace headers
 - Cleans up port forwards on exit
 
 ```bash
 ./evaluate-benchmark.sh --benchmark tau2 --agent tool_calling
-./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --mlflow
+./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling 
 ```
 
 ## Output
@@ -763,10 +741,14 @@ The Kagenti cluster exposes an MLflow service in the `kagenti-system` namespace.
 
 #### 1. Send runner telemetry to MLflow
 
-Use `--mlflow` so the script automatically port-forwards the OTEL Collector and configures the required environment variables:
+MLflow tracing is **enabled by default**. The script automatically port-forwards the OTEL Collector on a developer laptop and configures the required environment variables. To disable it, pass `--disable-mlflow`:
 
 ```bash
-env MAX_TASKS=1 MAX_PARALLEL_SESSIONS=1 ./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --mlflow
+# Default — MLflow tracing enabled
+env MAX_TASKS=1 MAX_PARALLEL_SESSIONS=1 ./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling
+
+# Disable MLflow tracing
+env MAX_TASKS=1 MAX_PARALLEL_SESSIONS=1 ./evaluate-benchmark.sh --benchmark gsm8k --agent tool_calling --disable-mlflow
 ```
 
 #### 2. Open the MLflow UI
@@ -909,7 +891,7 @@ Summary Statistics by Configuration:
 **No traces found:**
 - Verify traces exist in MLflow UI: http://mlflow.localtest.me:8080
 - Check that Agent.Session spans are being created by the runner
-- Ensure OTEL is enabled and `--mlflow` flag is passed to `evaluate-benchmark.sh`
+- MLflow tracing is enabled by default; pass `--disable-mlflow` only if you want to skip it
 
 **OAuth errors:**
 - Ensure the `mlflow-oauth-secret` exists in the `kagenti-system` namespace
@@ -924,6 +906,155 @@ When OTEL is enabled, you'll see:
 - **A2A requests**: Agent invocations with request/response sizes
 - **HTTP calls**: Auto-instrumented outbound requests
 - **Errors**: Failed operations with exception details
+
+## In-Cluster Execution (Kubernetes Job)
+
+The runner can execute entirely inside the cluster as a Kubernetes Job — no local machine needed after the image is built. This is the recommended path for CI and automated evaluation runs.
+
+### Overview
+
+`k8s/job.yaml` is the launch template. It references secrets for credentials and passes benchmark/agent flags as container `args`. The job container uses cluster-internal DNS to reach the Kagenti API, Keycloak, MCP server, and agent — no port-forwarding is required. MLflow tracing switches automatically to HTTP/protobuf when `KUBERNETES_SERVICE_HOST` is set.
+
+### Step 1 — Build and push the runner image
+
+```bash
+cd exgentic_a2a_runner
+docker build -t ghcr.io/exgentic/runner:latest .
+docker push ghcr.io/exgentic/runner:latest
+```
+
+Replace `ghcr.io/exgentic/runner:latest` with your own registry path if needed, and update `k8s/job.yaml` → `image:` to match.
+
+### Step 2 — Set up required secrets
+
+Run this **from your local machine** (not inside the cluster) before submitting the job. `update-secrets.sh` creates/patches the API-key secrets via kubectl:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export HF_TOKEN=hf_...          # optional; skip if not needed
+./update-secrets.sh --namespace team1
+```
+
+The `kagenti-test-user` secret (key: `password`) must already exist in `team1` — it is created by the Kagenti cluster setup and holds the Keycloak password.
+
+> **Note:** The job container itself does not have kubectl RBAC, so `update-secrets.sh` will print harmless warnings if it tries to run inside the cluster. The secrets just need to be present before the job starts.
+
+### Step 3 — Configure the job
+
+Edit `k8s/job.yaml` to set:
+
+| Field | Where | Example |
+|-------|-------|---------|
+| Benchmark | `args: ["--benchmark", "…"]` | `gsm8k`, `tau2`, `appworld` |
+| Agent | `args: ["--agent", "…"]` | `tool_calling` |
+| Model | `args: ["--model", "…"]` | `openai/Azure/gpt-4.1` |
+| LLM API base | `env: OPENAI_API_BASE` | your LiteLLM proxy URL |
+
+To disable MLflow tracing, add `"--disable-mlflow"` to `args`.
+
+### Step 4 — Submit and watch the job
+
+```bash
+# Delete any previous run with the same name first
+kubectl delete job exgentic-runner -n team1 --ignore-not-found
+
+# Submit
+kubectl apply -f k8s/job.yaml
+
+# Stream logs (the runner prints a summary table at the end)
+kubectl logs -f job/exgentic-runner -n team1
+```
+
+To watch job status separately:
+
+```bash
+kubectl get job exgentic-runner -n team1 -w
+```
+
+### Step 5 — View results
+
+**Console output** — the log stream ends with a run summary:
+
+```
+============================================================
+RUN SUMMARY
+============================================================
+Max Parallel Sessions: 1
+Sessions Attempted:   10
+Sessions Succeeded:   9
+Sessions With Error:  1
+Evaluation Success:   90.0%
+Total Wall Time:      312.4s
+
+TIMING BREAKDOWN (average per session)
+  Session Creation:   0.05s
+  Agent Processing:   31.2s
+  Evaluation:         0.02s
+
+AGENT PROCESSING LATENCY
+  Average:            31.20s
+  P50:                28.00s
+  P95:                58.00s
+============================================================
+```
+
+**MLflow UI** — if MLflow tracing was enabled (the default), open `http://mlflow.localtest.me:8080` to view traces grouped by experiment.
+
+### Iterating with a locally-built image
+
+To test a local image change without pushing to a registry, sync it into the kind cluster first:
+
+```bash
+export REMOTE_IMAGE_NAME=ghcr.io/exgentic/runner:dev
+export KIND_CLUSTER_NAME=kagenti
+source ./sync-image-to-cluster.sh
+```
+
+Then set `imagePullPolicy: IfNotPresent` in `k8s/job.yaml` and submit as above.
+
+## E2E Test Script
+
+`e2e-test.sh` runs `deploy-and-evaluate.sh` for every benchmark (or a chosen subset) and prints a consolidated results table.
+
+### Basic usage
+
+```bash
+# Run all three benchmarks sequentially (gsm8k → tau2 → appworld), 1 task each
+./e2e-test.sh --agent tool_calling
+
+# Run only a subset
+./e2e-test.sh --agent tool_calling --benchmarks gsm8k,tau2
+
+# Run with more tasks per benchmark
+./e2e-test.sh --agent tool_calling --tasks 10
+
+# Run all benchmarks in parallel (each benchmark gets its own port-forward slots)
+./e2e-test.sh --agent tool_calling --parallel-jobs
+
+# Run all benchmarks as Kubernetes Jobs (in-cluster mode)
+./e2e-test.sh --agent tool_calling --in-cluster
+
+# Dry run — prints all commands without executing them
+./e2e-test.sh --agent tool_calling --dry
+```
+
+Any flag not recognised by `e2e-test.sh` is forwarded verbatim to `deploy-and-evaluate.sh` (e.g. `--model`, `--experiment`, `--disable-mlflow`, `--plugin-preset`).
+
+### Results table
+
+After all benchmarks finish, the script prints and writes `e2e-results.md`:
+
+```
+| Benchmark | Status | Tasks | Parallel Sessions | Eval Success Rate | Avg Latency (s) | Failures |
+|-----------|--------|-------|-------------------|-------------------|-----------------|----------|
+| gsm8k     | PASS   | 1     | --                | 100.0%            | 4.2s            | 0        |
+| tau2      | PASS   | 1     | --                | 100.0%            | 12.8s           | 0        |
+| appworld  | PASS   | 1     | --                | 100.0%            | 9.1s            | 0        |
+```
+
+- **Status** is `PASS`, `FAIL`, or `SKIP` (skipped benchmarks appear when a sequential run aborts early). When a step fails, the status includes the step name, e.g. `FAIL(deploy-benchmark)`.
+- **Parallel jobs mode** (`--parallel-jobs`): all benchmarks run concurrently; each gets unique OTEL-collector and Prometheus ports so local port-forwards don't collide.
+- **In-cluster mode** (`--in-cluster`): one Kubernetes Job is created per benchmark from `k8s/job.yaml`; `e2e-test.sh` streams the logs and checks the job's success status.
 
 ## Current Limitations
 

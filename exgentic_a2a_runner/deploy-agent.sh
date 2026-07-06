@@ -33,10 +33,10 @@ if [ -f "$ENV_FILE" ]; then
     done <"$ENV_FILE"
 fi
 
-# Default values
+# Default values — env vars take precedence (allows injection via Kubernetes Job secrets)
 MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
-KEYCLOAK_PASSWORD="unknown"
+KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
@@ -173,135 +173,47 @@ else
     # Replace underscores with hyphens for Kubernetes compatibility
     AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
     AGENT_NAME="${AGENT_NAME//_/-}"
-    
+
     # Default to Exgentic registry, can be overridden with environment variable
     EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
     IMAGE_TAG="${IMAGE_TAG:-latest}"
     REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
-    LOCAL_IMAGE_NAME="localhost/${FULL_AGENT_NAME}:latest"
-    
-    # Will be set after image pull/check
-    IMAGE_NAME="$LOCAL_IMAGE_NAME"
-    IMAGE_NAME_WITHOUT_TAG="localhost/${FULL_AGENT_NAME}"
 fi
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
-KAGENTI_API="http://kagenti-api.localtest.me:8080"
-KEYCLOAK_API="http://keycloak.localtest.me:8080"
+
+# Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
+# shellcheck source=libsh/urls.sh
+source "$SCRIPT_DIR/libsh/urls.sh"
+
+KAGENTI_API="$(kagenti_api_url)"
+KEYCLOAK_API="$(keycloak_api_url)"
 
 echo "=========================================="
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     echo "Deploying Generic Agent: $AGENT_NAME"
 else
     echo "Deploying Exgentic Agent: $AGENT_NAME"
-    echo "From image: $IMAGE_NAME"
+    echo "From image: $REMOTE_IMAGE_NAME"
 fi
 echo "Model: $MODEL_NAME"
 echo "=========================================="
 echo ""
 
-# Step 0: If deploying from image, get and sync image
+# Step 0: Sync local image to cluster (image deployments only)
 if [ "$DEPLOYMENT_TYPE" = "image" ]; then
-    echo "Step 0: Setting up container image..."
-    
-    # Determine container runtime
-    if command -v podman &> /dev/null; then
-        CONTAINER_CMD="podman"
-    elif command -v docker &> /dev/null; then
-        CONTAINER_CMD="docker"
-    else
-        echo "Error: Neither podman nor docker found"
-        exit 1
-    fi
-    
-    echo "Using container runtime: $CONTAINER_CMD"
-    
     if [ "$USE_LOCAL_IMAGE" = "true" ]; then
-        # Force use of local image
-        echo "Using local image (--local-image flag set): $LOCAL_IMAGE_NAME"
-        IMAGE_NAME="$LOCAL_IMAGE_NAME"
-        
-        if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-            echo "Error: Local image $IMAGE_NAME not found"
-            echo "Please build the image first"
-            exit 1
-        fi
-        
-        echo "✓ Local image found: $IMAGE_NAME"
+        echo "Step 0: Syncing local image to cluster..."
+        export REMOTE_IMAGE_NAME KIND_CLUSTER_NAME="kagenti"
+        source "$(dirname "$0")/sync-image-to-cluster.sh"
     else
-        # Try to use remote image from Exgentic registry first
-        echo "Attempting to pull image from Exgentic registry: $REMOTE_IMAGE_NAME"
-        
-        if $CONTAINER_CMD pull "$REMOTE_IMAGE_NAME" ; then
-            echo "✓ Successfully pulled image from Exgentic registry"
-            # Tag it as localhost for kind compatibility
-            $CONTAINER_CMD tag "$REMOTE_IMAGE_NAME" "$LOCAL_IMAGE_NAME"
-            IMAGE_NAME="$LOCAL_IMAGE_NAME"
-        else
-            echo "Warning: Could not pull from Exgentic registry, checking for local image..."
-            IMAGE_NAME="$LOCAL_IMAGE_NAME"
-            
-            if ! $CONTAINER_CMD image inspect "$IMAGE_NAME" &> /dev/null; then
-                echo "Error: Image $IMAGE_NAME not found locally and could not pull from registry"
-                echo "Please either:"
-                echo "  1. Build the image locally and use --local-image flag, or"
-                echo "  2. Ensure you have access to $REMOTE_IMAGE_NAME"
-                exit 1
-            fi
-            
-            echo "✓ Using local image: $IMAGE_NAME"
-        fi
+        echo "Step 0: Syncing local image to cluster... (skipped, K8s will pull from remote registry)"
     fi
-    
-    # Check if kind is available
-    if ! command -v kind &> /dev/null; then
-        echo "Error: kind command not found"
-        exit 1
-    fi
-    
-    # Get local image ID
-    LOCAL_IMAGE_ID=$($CONTAINER_CMD inspect "$IMAGE_NAME" --format='{{.Id}}' 2>/dev/null || echo "")
-    
-    if [ -z "$LOCAL_IMAGE_ID" ]; then
-        echo "Error: Could not get local image ID"
-        exit 1
-    fi
-    
-    echo "Local image ID: $LOCAL_IMAGE_ID"
-    
-    # Get cluster image ID (check if image exists in cluster)
-    if command -v podman &> /dev/null; then
-        CLUSTER_IMAGE_ID=$(podman exec kagenti-control-plane crictl inspecti "$IMAGE_NAME" 2>/dev/null | grep '"id":' | head -1 | sed 's/.*"id": *"\([^"]*\)".*/\1/' || echo "")
-    else
-        CLUSTER_IMAGE_ID=$(docker exec kagenti-control-plane crictl inspecti "$IMAGE_NAME" 2>/dev/null | grep '"id":' | head -1 | sed 's/.*"id": *"\([^"]*\)".*/\1/' || echo "")
-    fi
-    
-    # Normalize IDs by removing sha256: prefix if present
-    LOCAL_IMAGE_ID_NORMALIZED="${LOCAL_IMAGE_ID#sha256:}"
-    CLUSTER_IMAGE_ID_NORMALIZED="${CLUSTER_IMAGE_ID#sha256:}"
-    
-    if [ -z "$CLUSTER_IMAGE_ID" ]; then
-        echo "Image not found in cluster, syncing..."
-        NEED_SYNC=true
-    elif [ "$LOCAL_IMAGE_ID_NORMALIZED" != "$CLUSTER_IMAGE_ID_NORMALIZED" ]; then
-        echo "Cluster image ID: $CLUSTER_IMAGE_ID"
-        echo "Images differ, syncing..."
-        NEED_SYNC=true
-    else
-        echo "Cluster image ID: $CLUSTER_IMAGE_ID"
-        echo "✓ Images match, skipping sync"
-        NEED_SYNC=false
-    fi
-    
-    if [ "$NEED_SYNC" = true ]; then
-        echo "Saving and loading image..."
-        $CONTAINER_CMD save "$IMAGE_NAME" | kind load image-archive /dev/stdin --name kagenti
-        echo "✓ Image synced to kind-kagenti cluster"
-    fi
-    
-    echo ""
 fi
+
+IMAGE_NAME="$REMOTE_IMAGE_NAME"
+echo ""
 
 # Step 1: Verify Keycloak is accessible
 echo "Step 1: Verifying Keycloak is accessible at $KEYCLOAK_API..."
@@ -481,11 +393,37 @@ if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
     exit 1
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Agent deleted or did not exist (HTTP $DELETE_RESPONSE)"
-else
-    echo "Warning: Delete returned HTTP $DELETE_RESPONSE"
-fi
 
-sleep 3
+    if [ "$DELETE_RESPONSE" = "200" ]; then
+        echo "Step 5a: Waiting for Kagenti to finish removing the old agent record..."
+        GONE_WAIT=0
+        GONE_MAX=30
+        while true; do
+            CHECK_CODE=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+                "$KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
+                -H "Authorization: Bearer $ACCESS_TOKEN") || CHECK_CODE="000"
+            if [ "$CHECK_CODE" = "404" ]; then
+                echo "✓ Agent record confirmed gone (HTTP 404)"
+                break
+            fi
+            if [ $GONE_WAIT -ge $GONE_MAX ]; then
+                echo "Error: Agent record still present after ${GONE_MAX}s — Kagenti cleanup stalled" >&2
+                exit 1
+            fi
+            sleep 2
+            GONE_WAIT=$((GONE_WAIT + 2))
+        done
+    fi
+else
+    # Any other status (e.g. 503 upstream/connection errors, 401/403) means the
+    # Kagenti API is broken or unreachable. Fail fast here rather than warn and
+    # continue into later steps that all hit the same dead backend.
+    echo "Error: Delete returned HTTP $DELETE_RESPONSE" >&2
+    echo "  Endpoint: $KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" >&2
+    echo "  Response: $(cat /tmp/kagenti_delete_response.txt)" >&2
+    echo "  The Kagenti API is not healthy; aborting deployment." >&2
+    exit 1
+fi
 
 echo ""
 
@@ -531,12 +469,11 @@ echo "Step 7: Preparing environment variables for deployment..."
 
 # Add MCP_URL(S) to environment variables
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
-    MCP_URL="http://mcp-gateway-istio.gateway-system.svc.cluster.local:8080/mcp"
+    MCP_URL="$(mcp_gateway_url)/mcp"
     echo "Using MCP Gateway URL: $MCP_URL"
 else
-    # Use internal Kubernetes service DNS for cluster communication
-    MCP_URL="http://${TOOL_NAME}-mcp.${NAMESPACE}.svc.cluster.local:8000/mcp"
-    echo "Using MCP internal service URL: $MCP_URL"
+    MCP_URL="$(tool_k8s_url "$TOOL_NAME" "$NAMESPACE")/mcp"
+    echo "Using MCP service URL: $MCP_URL"
 fi
 
 if [ "$DEPLOYMENT_TYPE" = "source" ]; then
@@ -762,7 +699,9 @@ if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Agent deployment successful"
 elif [ "$HTTP_CODE" = "409" ]; then
-    echo "✓ Agent already exists (HTTP 409)"
+    echo "Error: Kagenti API returned 409 — agent still exists after deletion" >&2
+    echo "  Response: $RESPONSE" >&2
+    exit 1
 else
     echo "Error: Kagenti API deployment failed with HTTP $HTTP_CODE"
     exit 1
@@ -807,42 +746,57 @@ if [ "$DEPLOYMENT_TYPE" = "source" ]; then
     fi
     echo ""
 else
-    # For image deployments, patch imagePullPolicy
-    echo "Step 9: Patching imagePullPolicy to IfNotPresent..."
-    sleep 2  # Give the deployment a moment to be created
-    kubectl patch deployment $AGENT_NAME -n $NAMESPACE -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent","imagePullPolicy":"IfNotPresent"}]}}}}' 2>/dev/null || echo "Warning: Could not patch imagePullPolicy"
-    echo "✓ ImagePullPolicy patched"
+    # For image deployments, conditionally patch imagePullPolicy
+    if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+        echo "Step 9: Patching imagePullPolicy to IfNotPresent..."
+        sleep 2  # Give the deployment a moment to be created
+        kubectl patch deployment $AGENT_NAME -n $NAMESPACE -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent","imagePullPolicy":"IfNotPresent"}]}}}}' 2>/dev/null || echo "Warning: Could not patch imagePullPolicy"
+        echo "✓ ImagePullPolicy patched"
+    else
+        echo "Step 9: Patching imagePullPolicy... (skipped, K8s will pull from remote registry)"
+    fi
     echo ""
 fi
 
-# Step 10: Wait for agent deployment to be created and ready
-echo "Step 10: Waiting for agent deployment to be created..."
+# Step 10: Wait for agent to be ready.
+# Uses an HTTP health check (agent card endpoint) — kubectl is not available
+# inside the job container.
+echo "Step 10: Waiting for agent to be ready..."
 
-# Wait for deployment to be created (up to 2 minutes)
-for i in {1..24}; do
-    if kubectl get deployment $AGENT_NAME -n $NAMESPACE >/dev/null 2>&1; then
-        echo "✓ Agent deployment created"
+AGENT_URL="$(agent_http_url "$AGENT_NAME" "$NAMESPACE")"
+echo "  Agent URL: $AGENT_URL"
+
+AGENT_READY=false
+AGENT_MAX_WAIT=180
+for i in $(seq 1 $AGENT_MAX_WAIT); do
+    AGENT_HTTP_CODE=$(curl -s -o /tmp/agent_ready_response.txt -w "%{http_code}" --max-time 3 \
+        "${AGENT_URL}/.well-known/agent-card.json" \
+        2>/dev/null) || AGENT_HTTP_CODE="000"
+    AGENT_RESPONSE=$(cat /tmp/agent_ready_response.txt 2>/dev/null || echo "")
+
+    if [ "$AGENT_HTTP_CODE" = "200" ] && echo "$AGENT_RESPONSE" | jq empty 2>/dev/null; then
+        echo "✓ Agent is ready (HTTP 200, valid JSON agent card)"
+        AGENT_READY=true
         break
     fi
-    echo "  Waiting for deployment to be created... ($i/24)"
-    sleep 5
+
+    if [ $((i % 15)) -eq 0 ]; then
+        if echo "$AGENT_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
+            echo "  Gateway error — pod not ready yet... (${i}s)"
+        else
+            echo "  Waiting for agent... HTTP $AGENT_HTTP_CODE (${i}s)"
+        fi
+    fi
+    sleep 1
 done
 
-# Check if deployment exists
-if ! kubectl get deployment $AGENT_NAME -n $NAMESPACE >/dev/null 2>&1; then
-    echo "✗ Agent deployment was not created within 2 minutes"
+if [ "$AGENT_READY" = false ]; then
+    echo "Error: Agent did not become ready within ${AGENT_MAX_WAIT}s" >&2
+    echo "  Last HTTP code: $AGENT_HTTP_CODE" >&2
+    echo "  Last response:  $AGENT_RESPONSE" >&2
     exit 1
 fi
 
-echo "Waiting for agent deployment to be ready..."
-kubectl wait --for=condition=available deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
-
-if [ $? -ne 0 ]; then
-    echo "✗ Agent deployment did not become ready"
-    exit 1
-fi
-
-echo "✓ Agent deployment is ready"
 echo ""
 
 # Step 11: Update openai-secret
@@ -851,42 +805,28 @@ echo "Final Configuration"
 echo "=========================================="
 echo ""
 
-# Step 11.1: Update the openai-secret with current OPENAI_API_KEY
-echo "Step 11.1: Updating openai-secret with OPENAI_API_KEY..."
+# Step 11.1: Update secrets
+echo "Step 11.1: Updating secrets..."
+"$SCRIPT_DIR/update-secrets.sh" --namespace "$NAMESPACE"
 
-if [ -z "$OPENAI_API_KEY" ]; then
-    echo "Warning: OPENAI_API_KEY environment variable is not set"
-    echo "Skipping secret update"
+echo ""
+
+# Step 11.2/11.3: Set resource limits and wait for rollout (local/dev only).
+if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+    echo "Step 11.2: Setting resource limits... (skipped — kubectl not available in-cluster)"
 else
-    # Encode the API key in base64
-    ENCODED_KEY=$(echo -n "$OPENAI_API_KEY" | base64)
-    
-    # Patch the secret
-    kubectl patch secret openai-secret -n $NAMESPACE --type='json' -p="[
-      {
-        \"op\": \"replace\",
-        \"path\": \"/data/apikey\",
-        \"value\": \"$ENCODED_KEY\"
-      }
-    ]" 2>/dev/null && echo "✓ Secret updated" || echo "Warning: Could not update secret"
+    echo "Step 11.2: Setting resource limits..."
+    kubectl set resources deployment/$AGENT_NAME -n $NAMESPACE \
+        --limits=cpu=4,memory=2Gi \
+        --requests=cpu=500m,memory=512Mi 2>/dev/null \
+        && echo "✓ Agent resource limits set (CPU: 4 cores, Memory: 2Gi)" \
+        || echo "Warning: Could not set resource limits"
+    echo ""
+
+    echo "Step 11.3: Waiting for deployment to stabilize..."
+    kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
+    echo "✓ Deployment stable"
 fi
-
-echo ""
-
-# Step 11.2: Set resource limits
-echo "Step 11.2: Setting resource limits..."
-
-# Set CPU limit to 4 cores and memory limit to 3GB
-kubectl set resources deployment/$AGENT_NAME -n $NAMESPACE \
-    --limits=cpu=4,memory=2Gi \
-    --requests=cpu=500m,memory=512Mi 2>/dev/null && echo "✓ Agent resource limits set (CPU: 4 cores, Memory: 3Gi)" || echo "Warning: Could not set resource limits"
-
-echo ""
-
-# Step 11.3: Wait for deployment to stabilize
-echo "Step 11.3: Waiting for deployment to stabilize..."
-kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
-echo "✓ Deployment stable"
 echo ""
 
 # Step 11.4: Apply the AuthBridge plugin pipeline overlay (if any
@@ -916,52 +856,11 @@ if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
     echo ""
 fi
 
-# Step 12: Test agent card access
-echo "Step 12: Testing agent card access..."
-
-
-# Use HTTP route endpoint instead of port-forward
-AGENT_HTTP_ROUTE_URL="http://${AGENT_NAME}.${NAMESPACE}.localtest.me:8080"
-
-echo "Using HTTP route URL: $AGENT_HTTP_ROUTE_URL"
-
-# Wait for HTTP route to be ready (up to 60s)
-CARD_RESPONSE=""
-HTTP_CODE=""
-for i in $(seq 1 60); do
-    HTTP_CODE=$(curl -s -o /tmp/agent_card_response.txt -w "%{http_code}" --max-time 3 "${AGENT_HTTP_ROUTE_URL}/.well-known/agent-card.json" 2>/dev/null) || true
-    CARD_RESPONSE=$(cat /tmp/agent_card_response.txt 2>/dev/null || echo "")
-    
-    # Check for successful response (HTTP 200) and valid JSON
-    if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
-        break
-    fi
-    
-    # Check for gateway errors
-    if echo "$CARD_RESPONSE" | grep -q "upstream connect error\|reset before headers\|no healthy upstream"; then
-        if [ $((i % 10)) -eq 0 ]; then
-            echo "  Gateway error (backend not ready yet)... (${i}s)"
-        fi
-    elif [ $((i % 10)) -eq 0 ]; then
-        echo "  Waiting for agent to be ready... (${i}s)"
-    fi
-    sleep 1
-done
-
-if [ "$HTTP_CODE" = "200" ] && echo "$CARD_RESPONSE" | jq empty 2>/dev/null; then
-    echo "✓ Agent card access successful:"
-    echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "$CARD_RESPONSE"
-else
-    echo "✗ Agent card endpoint not accessible after 60s"
-    echo "  HTTP Code: $HTTP_CODE"
-    if [ -n "$CARD_RESPONSE" ]; then
-        echo "  Response: $CARD_RESPONSE"
-    fi
-    echo "  Agent is deployed and running, but HTTP route may not be fully configured"
-    echo ""
-    echo "Deployment failed: Agent card endpoint not accessible"
-    exit 1
-fi
+# Step 12: Agent card already verified in Step 10; just show it.
+echo "Step 12: Agent card:"
+AGENT_HTTP_ROUTE_URL="$(agent_http_url "$AGENT_NAME" "$NAMESPACE")"
+CARD_RESPONSE=$(curl -s --max-time 5 "${AGENT_HTTP_ROUTE_URL}/.well-known/agent-card.json" 2>/dev/null || echo "")
+echo "$CARD_RESPONSE" | jq '.name, .description' 2>/dev/null || echo "  (could not re-fetch card)"
 
 echo ""
 echo "=========================================="

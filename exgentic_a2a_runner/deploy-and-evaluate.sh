@@ -2,26 +2,42 @@
 # Deploy benchmark, agent, and run evaluation in one command
 # Usage: ./deploy-and-evaluate.sh --benchmark <name> --agent <name> [OPTIONS]
 # Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
-# Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini
+# Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --model openai/Azure/gpt-4o-mini
 
 set -e
+
+# Report which step failed, then exit. Used as `cmd || fail "..."`: the `||`
+# suppresses set -e for cmd so this message actually prints. A plain trailing
+# `if [ $? -ne 0 ]` check is dead code under set -e — the script is killed on
+# the failing line before the check ever runs.
+fail() {
+    echo ""
+    echo "Error: $1"
+    echo "STEP_FAILED: $1"
+    exit 1
+}
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load environment variables if .env exists
+# Load environment variables if .env exists (only vars not already in the environment)
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    source "$SCRIPT_DIR/.env"
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        if [ -z "${!key+x}" ]; then
+            export "$key=$value"
+        fi
+    done < <(grep -v '^#' "$SCRIPT_DIR/.env" | grep -v '^$')
 fi
 
 # Default values (env vars from .env take precedence, CLI args override both)
 BENCHMARK_NAME=""
 AGENT_NAME=""
 EXPERIMENT_NAME="default"
-MODEL_NAME="Azure/gpt-4.1"
+MODEL_NAME="openai/Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
-KEYCLOAK_PASSWORD="unknown"
-MLFLOW_ENABLED="false"
+KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
+MLFLOW_ENABLED="true"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_LOCAL_IMAGE="false"
 DRY_RUN="false"
@@ -59,8 +75,8 @@ while [[ $# -gt 0 ]]; do
             KEYCLOAK_PASSWORD="$2"
             shift 2
             ;;
-        --mlflow)
-            MLFLOW_ENABLED="true"
+        --disable-mlflow)
+            MLFLOW_ENABLED="false"
             shift
             ;;
         --use-mcp-gateway)
@@ -100,10 +116,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Optional Arguments:"
             echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
-            echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
+            echo "  --model MODEL              Model name (default: openai/Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
-            echo "  --mlflow                   Enable MLflow tracing via OTEL collector during evaluation"
+            echo "  --disable-mlflow           Disable MLflow tracing via OTEL collector during evaluation (default: enabled)"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --local-image              Use locally built images instead of pulling from registry"
             echo "  --dry                      Dry run mode - print commands without executing them"
@@ -118,9 +134,9 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  $0 --benchmark tau2 --agent tool_calling"
             echo "  $0 --benchmark tau2 --agent tool_calling --experiment baseline"
-            echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini"
-            echo "  $0 --benchmark gsm8k --agent generic_agent --model Azure/gpt-4o"
-            echo "  $0 --benchmark gsm8k --agent tool_calling --mlflow --experiment test1"
+            echo "  $0 --benchmark tau2 --agent tool_calling --model openai/Azure/gpt-4o-mini"
+            echo "  $0 --benchmark gsm8k --agent generic_agent --model openai/Azure/gpt-4o"
+            echo "  $0 --benchmark gsm8k --agent tool_calling --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             echo ""
             echo "This script will:"
@@ -223,13 +239,9 @@ else
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
         $MCP_GATEWAY_FLAG \
-        $LOCAL_IMAGE_FLAG
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Benchmark deployment failed"
-        exit 1
-    fi
-    
+        $LOCAL_IMAGE_FLAG \
+        || fail "deploy benchmark failed"
+
     echo ""
     echo "✓ Benchmark deployed successfully"
     echo ""
@@ -263,13 +275,9 @@ else
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
-        "${PLUGIN_FLAGS[@]}"
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Agent deployment failed"
-        exit 1
-    fi
-    
+        "${PLUGIN_FLAGS[@]}" \
+        || fail "deploy agent failed"
+
     echo ""
     echo "✓ Agent deployed successfully"
     echo ""
@@ -287,8 +295,8 @@ if [ "$DRY_RUN" = "true" ]; then
         --benchmark "$BENCHMARK_NAME" \
         --agent "$AGENT_NAME" \
         --experiment "$EXPERIMENT_NAME")
-    if [ "$MLFLOW_ENABLED" = "true" ]; then
-        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --mlflow)"
+    if [ "$MLFLOW_ENABLED" = "false" ]; then
+        EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --disable-mlflow)"
     fi
     if [ "$USE_MCP_GATEWAY" = "true" ]; then
         EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --use-mcp-gateway)"
@@ -297,19 +305,15 @@ if [ "$DRY_RUN" = "true" ]; then
     echo ""
 else
     EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
-    if [ "$MLFLOW_ENABLED" = "true" ]; then
-        EVALUATE_ARGS+=(--mlflow)
+    if [ "$MLFLOW_ENABLED" = "false" ]; then
+        EVALUATE_ARGS+=(--disable-mlflow)
     fi
     if [ "$USE_MCP_GATEWAY" = "true" ]; then
         EVALUATE_ARGS+=(--use-mcp-gateway)
     fi
     
-    "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}"
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Evaluation failed"
-        exit 1
-    fi
+    "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}" \
+        || fail "evaluate failed"
 fi
 
 if [ "$DRY_RUN" = "true" ]; then

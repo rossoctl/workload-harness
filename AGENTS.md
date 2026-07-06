@@ -2,6 +2,39 @@
 
 These guidelines apply to all AI coding agents working in this repository (e.g. Bob, Claude).
 
+## Branching Policy
+
+### Always Create a Branch Before Committing
+
+**IMPORTANT**: Never commit directly to `main`. Always create a dedicated branch for each change, commit there, and push the branch.
+
+```sh
+# Correct - create a branch first
+git checkout -b feat/my-change
+git commit -s -m "feat: add my change"
+git push origin feat/my-change
+
+# Wrong - committing directly on main
+git checkout main
+git commit -s -m "feat: add my change"
+```
+
+Branch naming should follow the conventional commit prefix of the work:
+- `feat/<short-description>` for new features
+- `fix/<short-description>` for bug fixes
+- `docs/<short-description>` for documentation changes
+- `refactor/<short-description>` for refactoring
+- `chore/<short-description>` for maintenance tasks
+
+## Pre-Commit Documentation Review
+
+Before every commit, review the documentation to ensure it is up to date with your changes:
+
+- **README.md** — update if you changed usage, configuration, flags, scripts, or deployment steps
+- **AGENTS.md** — update if you changed agent guidelines, branching policy, or commit conventions
+
+If the docs don't need changes, no action is required — but you must consciously check before committing.
+
 ## Git Commit Guidelines
 
 ### Always Use `-s` Flag for Commits
