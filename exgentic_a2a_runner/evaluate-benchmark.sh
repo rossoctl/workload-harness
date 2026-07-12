@@ -151,12 +151,14 @@ if [ -z "$KUBERNETES_SERVICE_HOST" ]; then
     fi
 
     if [ "$CURRENT_CONTEXT" != "kind-kagenti" ]; then
-        echo "Warning: Not connected to kind-kagenti cluster"
-        read -p "Continue anyway? (y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        # Accept OpenShift clusters (detected by the presence of OpenShift API groups).
+        # Reject anything else to catch accidental wrong-context runs.
+        if ! "$KUBECTL_BIN" api-resources --api-group=apps.openshift.io \
+                --no-headers 2>/dev/null | grep -q .; then
+            echo "Error: current context '$CURRENT_CONTEXT' is neither kind-kagenti nor an OpenShift cluster"
             exit 1
         fi
+        echo "OpenShift cluster detected — continuing."
     fi
 else
     echo "Running in-cluster — skipping kubectl context check."

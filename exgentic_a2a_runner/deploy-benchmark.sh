@@ -148,7 +148,7 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
         echo "✓ Fetched Keycloak password from cluster"
     else
         echo "⚠ Could not fetch password from cluster, will try default password 'admin'"
-        KEYCLOAK_PASSWORD="admin"
+        exit 1
     fi
     echo ""
 fi
@@ -156,53 +156,54 @@ fi
 # Step 4: Enable Direct Access Grants for kagenti client if needed
 echo "Step 4: Enabling Direct Access Grants for kagenti client..."
 
-# Get admin token first (use "admin" password for master realm)
+# Resolve master-realm admin credentials: prefer env vars, fall back to the
+# keycloak-initial-admin secret (RHBK operator), then defaults.
+KEYCLOAK_ADMIN_USERNAME="${KEYCLOAK_ADMIN_USERNAME:-}"
+KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-}"
+if [ -z "$KEYCLOAK_ADMIN_USERNAME" ] || [ -z "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+    KC_ADMIN_USERNAME=$(kubectl get secret keycloak-initial-admin -n keycloak \
+        -o jsonpath='{.data.username}' 2>/dev/null | base64 -d 2>/dev/null || true)
+    KC_ADMIN_PASSWORD=$(kubectl get secret keycloak-initial-admin -n keycloak \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+    KEYCLOAK_ADMIN_USERNAME="${KEYCLOAK_ADMIN_USERNAME:-${KC_ADMIN_USERNAME:-admin}}"
+    KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-${KC_ADMIN_PASSWORD:-admin}}"
+fi
+
 ADMIN_TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/master/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=admin" \
-    -d "password=admin" \
+    -d "username=${KEYCLOAK_ADMIN_USERNAME}" \
+    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
     -d "grant_type=password" \
-    -d "client_id=admin-cli" 2>/dev/null || echo "TOKEN_ERROR")
+    -d "client_id=admin-cli" 2>/dev/null) || true
 
-if [ "$ADMIN_TOKEN_RESPONSE" != "TOKEN_ERROR" ]; then
-    ADMIN_TOKEN=$(echo "$ADMIN_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"\([^"]*\)"/\1/')
-    
-    if [ -n "$ADMIN_TOKEN" ]; then
-        # Get kagenti client configuration
-        CLIENT_CONFIG=$(curl -s "$KEYCLOAK_API/admin/realms/kagenti/clients?clientId=kagenti" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null)
-        
-        CLIENT_ID=$(echo "$CLIENT_CONFIG" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"\([^"]*\)"/\1/')
-        
-        if [ -n "$CLIENT_ID" ]; then
-            # Enable direct access grants
-            curl -s -X PUT "$KEYCLOAK_API/admin/realms/kagenti/clients/$CLIENT_ID" \
-                -H "Authorization: Bearer $ADMIN_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{"directAccessGrantsEnabled": true}' >/dev/null 2>&1
-            echo "✓ Direct access grants enabled for kagenti client"
-        fi
-    fi
-fi
-
-echo ""
-
-# Step 4.5: Verify Keycloak password works now that Direct Access Grants is enabled
-echo "Step 4.5: Verifying Keycloak authentication..."
-TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=$KEYCLOAK_USERNAME" \
-    -d "password=$KEYCLOAK_PASSWORD" \
-    -d "grant_type=password" \
-    -d "client_id=kagenti" 2>/dev/null || echo "")
-
-if ! echo "$TEST_AUTH" | grep -q "access_token"; then
-    echo "⚠ Warning: Authentication failed with current password"
-    echo "Response: $TEST_AUTH"
-    echo "Please provide the correct password using --keycloak-pass option"
+ADMIN_TOKEN=$(echo "$ADMIN_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"\([^"]*\)"/\1/')
+if [ -z "$ADMIN_TOKEN" ]; then
+    echo "Error: Could not obtain master-realm admin token from Keycloak"
+    echo "  Response: $ADMIN_TOKEN_RESPONSE"
+    echo "  Set KEYCLOAK_ADMIN_PASSWORD in your .env if the master realm admin password is not 'admin'."
     exit 1
 fi
-echo "✓ Keycloak authentication verified"
+
+CLIENT_CONFIG=$(curl -s "$KEYCLOAK_API/admin/realms/kagenti/clients?clientId=kagenti" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null)
+CLIENT_ID=$(echo "$CLIENT_CONFIG" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"\([^"]*\)"/\1/')
+if [ -z "$CLIENT_ID" ]; then
+    echo "Error: Could not find kagenti client ID in Keycloak"
+    echo "  Response: $CLIENT_CONFIG"
+    exit 1
+fi
+
+PUT_CODE=$(curl -s -o /tmp/kc_put_response.txt -w "%{http_code}" \
+    -X PUT "$KEYCLOAK_API/admin/realms/kagenti/clients/$CLIENT_ID" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"directAccessGrantsEnabled": true}' 2>/dev/null) || PUT_CODE="000"
+if [ "$PUT_CODE" != "204" ] && [ "$PUT_CODE" != "200" ]; then
+    echo "Error: Failed to enable direct access grants for kagenti client (HTTP $PUT_CODE)"
+    echo "  Response: $(cat /tmp/kc_put_response.txt 2>/dev/null)"
+    exit 1
+fi
+echo "✓ Direct access grants enabled for kagenti client"
 
 echo ""
 
