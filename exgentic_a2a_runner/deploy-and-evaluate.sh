@@ -3,6 +3,7 @@
 # Usage: ./deploy-and-evaluate.sh --benchmark <name> --agent <name> [OPTIONS]
 # Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling
 # Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --model openai/Azure/gpt-4o-mini
+# Example: ./deploy-and-evaluate.sh --benchmark tau2 --agent tool_calling --openshift apps.mycluster.example.com
 
 set -e
 
@@ -41,6 +42,8 @@ MLFLOW_ENABLED="true"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_LOCAL_IMAGE="false"
 DRY_RUN="false"
+CLUSTER_MODE=""
+INGRESS_DOMAIN=""
 
 # AuthBridge plugin pipeline flags forwarded to deploy-agent.sh.
 # See AUTHBRIDGE_PIPELINE_SPEC.md for the resolver semantics.
@@ -107,6 +110,19 @@ while [[ $# -gt 0 ]]; do
             PIPELINE_OVERLAY_FILE="$2"
             shift 2
             ;;
+        --kind)
+            CLUSTER_MODE="kind"
+            shift
+            ;;
+        --openshift)
+            CLUSTER_MODE="openshift"
+            INGRESS_DOMAIN="$2"
+            shift 2
+            ;;
+        --in-cluster)
+            CLUSTER_MODE="in-cluster"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -123,6 +139,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --local-image              Use locally built images instead of pulling from registry"
             echo "  --dry                      Dry run mode - print commands without executing them"
+            echo "  --kind                     Target a local Kind cluster (default)"
+            echo "  --openshift DOMAIN         Target an OpenShift cluster with the given ingress domain"
+            echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -193,6 +212,19 @@ else
 fi
 echo ""
 
+# Build cluster-mode flag for sub-scripts
+CLUSTER_FLAG=()
+case "$CLUSTER_MODE" in
+    kind)       CLUSTER_FLAG=(--kind) ;;
+    openshift)  CLUSTER_FLAG=(--openshift "$INGRESS_DOMAIN") ;;
+    in-cluster) CLUSTER_FLAG=(--in-cluster) ;;
+    "")         ;;  # not set; sub-scripts will apply their own default
+    *)
+        echo "Error: unknown --cluster-mode '${CLUSTER_MODE}'. Use --kind, --openshift DOMAIN, or --in-cluster."
+        exit 1
+        ;;
+esac
+
 # Build gateway and local-image flags for sub-scripts
 MCP_GATEWAY_FLAG=""
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
@@ -228,7 +260,8 @@ if [ "$DRY_RUN" = "true" ]; then
         --benchmark "$BENCHMARK_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
-        --keycloak-pass "$KEYCLOAK_PASSWORD")
+        --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        "${CLUSTER_FLAG[@]}")
     [ -n "$MCP_GATEWAY_FLAG" ] && BENCHMARK_CMD_DISPLAY="$BENCHMARK_CMD_DISPLAY$(printf '%q ' "$MCP_GATEWAY_FLAG")"
     [ -n "$LOCAL_IMAGE_FLAG" ] && BENCHMARK_CMD_DISPLAY="$BENCHMARK_CMD_DISPLAY$(printf '%q ' "$LOCAL_IMAGE_FLAG")"
     echo "$BENCHMARK_CMD_DISPLAY"
@@ -238,6 +271,7 @@ else
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        "${CLUSTER_FLAG[@]}" \
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
         || fail "deploy benchmark failed"
@@ -260,7 +294,8 @@ if [ "$DRY_RUN" = "true" ]; then
         --agent "$AGENT_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
-        --keycloak-pass "$KEYCLOAK_PASSWORD")
+        --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        "${CLUSTER_FLAG[@]}")
     [ -n "$MCP_GATEWAY_FLAG" ] && AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY$(printf '%q ' "$MCP_GATEWAY_FLAG")"
     [ -n "$LOCAL_IMAGE_FLAG" ] && AGENT_CMD_DISPLAY="$AGENT_CMD_DISPLAY$(printf '%q ' "$LOCAL_IMAGE_FLAG")"
     if [ ${#PLUGIN_FLAGS[@]} -gt 0 ]; then
@@ -273,6 +308,7 @@ else
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
+        "${CLUSTER_FLAG[@]}" \
         $MCP_GATEWAY_FLAG \
         $LOCAL_IMAGE_FLAG \
         "${PLUGIN_FLAGS[@]}" \
@@ -294,7 +330,8 @@ if [ "$DRY_RUN" = "true" ]; then
         "$SCRIPT_DIR/evaluate-benchmark.sh" \
         --benchmark "$BENCHMARK_NAME" \
         --agent "$AGENT_NAME" \
-        --experiment "$EXPERIMENT_NAME")
+        --experiment "$EXPERIMENT_NAME" \
+        "${CLUSTER_FLAG[@]}")
     if [ "$MLFLOW_ENABLED" = "false" ]; then
         EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --disable-mlflow)"
     fi
@@ -311,7 +348,10 @@ else
     if [ "$USE_MCP_GATEWAY" = "true" ]; then
         EVALUATE_ARGS+=(--use-mcp-gateway)
     fi
-    
+    if [ ${#CLUSTER_FLAG[@]} -gt 0 ]; then
+        EVALUATE_ARGS+=("${CLUSTER_FLAG[@]}")
+    fi
+
     "$SCRIPT_DIR/evaluate-benchmark.sh" "${EVALUATE_ARGS[@]}" \
         || fail "evaluate failed"
 fi

@@ -3,7 +3,7 @@
 # Usage: ./deploy-benchmark.sh --benchmark <name> [OPTIONS]
 # Example: ./deploy-benchmark.sh --benchmark gsm8k
 # Example: ./deploy-benchmark.sh --benchmark tau2 --model Azure/gpt-4o-mini
-# Example: ./deploy-benchmark.sh --benchmark tau2 --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin
+# Example: ./deploy-benchmark.sh --benchmark tau2 --openshift apps.mycluster.example.com
 
 set -e
 
@@ -14,6 +14,7 @@ KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
 BENCHMARK_NAME=""
 USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
+CLUSTER_MODE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -42,6 +43,19 @@ while [[ $# -gt 0 ]]; do
             USE_LOCAL_IMAGE="true"
             shift
             ;;
+        --kind)
+            CLUSTER_MODE="kind"
+            shift
+            ;;
+        --openshift)
+            CLUSTER_MODE="openshift"
+            INGRESS_DOMAIN="$2"
+            shift 2
+            ;;
+        --in-cluster)
+            CLUSTER_MODE="in-cluster"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> [OPTIONS]"
             echo ""
@@ -54,12 +68,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Register MCP server with the MCP Gateway"
             echo "  --local-image              Use locally built image instead of pulling from registry"
+            echo "  --kind                     Target a local Kind cluster (default)"
+            echo "  --openshift DOMAIN         Target an OpenShift cluster with the given ingress domain"
+            echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0 --benchmark gsm8k"
             echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini"
-            echo "  $0 --benchmark tau2 --model Azure/gpt-4o-mini --keycloak-user admin --keycloak-pass admin"
+            echo "  $0 --benchmark tau2 --openshift apps.mycluster.example.com"
             echo "  $0 --benchmark tau2 --use-mcp-gateway"
             echo "  $0 --benchmark gsm8k --local-image"
             exit 0
@@ -86,8 +103,14 @@ fi
 
 # Load shared URL helpers (kagenti_api_url, keycloak_api_url, tool_http_url, …)
 SCRIPT_DIR_BENCH="$(cd "$(dirname "$0")" && pwd)"
+export CLUSTER_MODE INGRESS_DOMAIN
 # shellcheck source=libsh/urls.sh
 source "$SCRIPT_DIR_BENCH/libsh/urls.sh"
+
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
+# shellcheck source=libsh/check-kubectl-context.sh
+source "$SCRIPT_DIR_BENCH/libsh/check-kubectl-context.sh"
+check_kubectl_context
 
 # Default to Exgentic registry, can be overridden with environment variable
 EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
@@ -338,7 +361,11 @@ echo ""
 
 # Step 7.1.1 + 7.1.2: Update secrets
 echo "Step 7.1.1: Updating secrets..."
-"$SCRIPT_DIR_BENCH/update-secrets.sh" --namespace "$NAMESPACE"
+if [ "$CLUSTER_MODE" = "kind" ]; then
+    "$SCRIPT_DIR_BENCH/update-secrets.sh" --namespace "$NAMESPACE"
+else
+    echo "Step 7.1.1: Updating secrets... (skipped — secrets are pre-provisioned on OpenShift/in-cluster)"
+fi
 
 echo ""
 
@@ -523,7 +550,7 @@ fi
 echo ""
 
 # Step 12: Set resource limits (local/dev only — kubectl not available in-cluster).
-if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+if [ "$CLUSTER_MODE" = "in-cluster" ]; then
     echo "Step 12: Setting resource limits... (skipped — kubectl not available in-cluster)"
 else
     echo "Step 12.1: Setting resource limits..."

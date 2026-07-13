@@ -3,6 +3,7 @@
 # Usage: ./deploy-agent.sh --benchmark <name> --agent <name> [OPTIONS]
 # Example: ./deploy-agent.sh --benchmark gsm8k --agent generic_agent
 # Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini
+# Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --openshift apps.mycluster.example.com
 
 set -e
 
@@ -41,6 +42,7 @@ BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
 USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
+CLUSTER_MODE=""
 
 # AuthBridge plugin pipeline composition. See AUTHBRIDGE_PIPELINE_SPEC.md.
 # PIPELINE_PRESET is set by --plugin-preset; PIPELINE_SELECTORS accumulates
@@ -97,6 +99,19 @@ while [[ $# -gt 0 ]]; do
             PIPELINE_OVERLAY_FILE="$2"
             shift 2
             ;;
+        --kind)
+            CLUSTER_MODE="kind"
+            shift
+            ;;
+        --openshift)
+            CLUSTER_MODE="openshift"
+            INGRESS_DOMAIN="$2"
+            shift 2
+            ;;
+        --in-cluster)
+            CLUSTER_MODE="in-cluster"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -110,6 +125,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
             echo "  --local-image              Use locally built image instead of pulling from registry (image deployments only)"
+            echo "  --kind                     Target a local Kind cluster (default)"
+            echo "  --openshift DOMAIN         Target an OpenShift cluster with the given ingress domain"
+            echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
             echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
@@ -184,8 +202,14 @@ TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
 
 # Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
+export CLUSTER_MODE INGRESS_DOMAIN
 # shellcheck source=libsh/urls.sh
 source "$SCRIPT_DIR/libsh/urls.sh"
+
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
+# shellcheck source=libsh/check-kubectl-context.sh
+source "$SCRIPT_DIR/libsh/check-kubectl-context.sh"
+check_kubectl_context
 
 KAGENTI_API="$(kagenti_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
@@ -806,13 +830,17 @@ echo "=========================================="
 echo ""
 
 # Step 11.1: Update secrets
-echo "Step 11.1: Updating secrets..."
-"$SCRIPT_DIR/update-secrets.sh" --namespace "$NAMESPACE"
+if [ "$CLUSTER_MODE" = "kind" ]; then
+    echo "Step 11.1: Updating secrets..."
+    "$SCRIPT_DIR/update-secrets.sh" --namespace "$NAMESPACE"
+else
+    echo "Step 11.1: Updating secrets... (skipped — secrets are pre-provisioned on OpenShift/in-cluster)"
+fi
 
 echo ""
 
 # Step 11.2/11.3: Set resource limits and wait for rollout (local/dev only).
-if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+if [ "$CLUSTER_MODE" = "in-cluster" ]; then
     echo "Step 11.2: Setting resource limits... (skipped — kubectl not available in-cluster)"
 else
     echo "Step 11.2: Setting resource limits..."

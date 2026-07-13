@@ -15,6 +15,7 @@ MLFLOW_ENABLED="true"
 OTEL_COLLECTOR_NAMESPACE="kagenti-system"
 OTEL_COLLECTOR_SERVICE="otel-collector"
 OTEL_COLLECTOR_LOCAL_PORT="${OTEL_COLLECTOR_LOCAL_PORT:-4327}"
+CLUSTER_MODE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,19 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --kind)
+            CLUSTER_MODE="kind"
+            shift
+            ;;
+        --openshift)
+            CLUSTER_MODE="openshift"
+            INGRESS_DOMAIN="$2"
+            shift 2
+            ;;
+        --in-cluster)
+            CLUSTER_MODE="in-cluster"
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --benchmark <name> --agent <name> [OPTIONS]"
             echo ""
@@ -50,6 +64,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
             echo "  --disable-mlflow           Disable MLflow tracing via OTEL collector (default: enabled)"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
+            echo "  --kind                     Target a local Kind cluster (default)"
+            echo "  --openshift DOMAIN         Target an OpenShift cluster with the given ingress domain"
+            echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
@@ -57,6 +74,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --benchmark gsm8k --agent generic_agent --experiment baseline"
             echo "  $0 --benchmark gsm8k --agent tool_calling --experiment test1"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
+            echo "  $0 --benchmark tau2 --agent tool_calling --openshift apps.mycluster.example.com"
             exit 0
             ;;
         -*)
@@ -92,6 +110,7 @@ if [ -f "$EVAL_SCRIPT_DIR/.env" ]; then
 fi
 
 # Load shared URL helpers
+export CLUSTER_MODE INGRESS_DOMAIN
 # shellcheck source=libsh/urls.sh
 source "$EVAL_SCRIPT_DIR/libsh/urls.sh"
 
@@ -127,42 +146,9 @@ fi
 echo "MLflow tracing: ${MLFLOW_ENABLED}"
 echo ""
 
-# When running inside the cluster there is no kubeconfig and no named context.
-# Interactive prompts would hang forever, so skip the entire kubectl context
-# check. All service access goes through cluster DNS / HTTP routes.
-if [ -z "$KUBERNETES_SERVICE_HOST" ]; then
-    # Check if kubectl is available
-    if ! command -v "$KUBECTL_BIN" &> /dev/null; then
-        echo "Error: $KUBECTL_BIN is not installed or not in PATH"
-        exit 1
-    fi
-
-    # Check if we're connected to a reachable cluster
-    if ! CURRENT_CONTEXT=$("$KUBECTL_BIN" config current-context 2>/dev/null); then
-        echo "Error: Unable to determine current kubectl context"
-        exit 1
-    fi
-    echo "Current kubectl context: $CURRENT_CONTEXT"
-
-    if ! "$KUBECTL_BIN" cluster-info >/dev/null 2>&1; then
-        echo "Error: kubectl context '$CURRENT_CONTEXT' is not reachable"
-        echo "Hint: refresh your cluster access or set KUBECTL_BIN to another kubectl wrapper"
-        exit 1
-    fi
-
-    if [ "$CURRENT_CONTEXT" != "kind-kagenti" ]; then
-        # Accept OpenShift clusters (detected by the presence of OpenShift API groups).
-        # Reject anything else to catch accidental wrong-context runs.
-        if ! "$KUBECTL_BIN" api-resources --api-group=apps.openshift.io \
-                --no-headers 2>/dev/null | grep -q .; then
-            echo "Error: current context '$CURRENT_CONTEXT' is neither kind-kagenti nor an OpenShift cluster"
-            exit 1
-        fi
-        echo "OpenShift cluster detected — continuing."
-    fi
-else
-    echo "Running in-cluster — skipping kubectl context check."
-fi
+# shellcheck source=libsh/check-kubectl-context.sh
+source "$EVAL_SCRIPT_DIR/libsh/check-kubectl-context.sh"
+check_kubectl_context
 
 # Derive canonical service URLs using the shared helpers.
 # Extract deployment names (remove -mcp suffix from BENCHMARK_SERVICE if present)
@@ -256,7 +242,7 @@ PROMETHEUS_LOCAL_PORT="${PROMETHEUS_LOCAL_PORT:-9191}"
 PROMETHEUS_NAMESPACE="istio-system"
 PROMETHEUS_SERVICE="prometheus"
 
-if [ -z "$KUBERNETES_SERVICE_HOST" ]; then
+if [ "$CLUSTER_MODE" != "in-cluster" ]; then
     if [ "$MLFLOW_ENABLED" = "true" ]; then
         echo "Starting port-forward for OTEL collector (traces -> MLflow)..."
         "$KUBECTL_BIN" port-forward -n $OTEL_COLLECTOR_NAMESPACE svc/$OTEL_COLLECTOR_SERVICE ${OTEL_COLLECTOR_LOCAL_PORT}:4317 >/dev/null 2>&1 &
@@ -327,7 +313,7 @@ fi
 if [ "$MLFLOW_ENABLED" = "true" ]; then
     echo -n "  OTEL Collector: "
     OTEL_CHECK_URL="$(otel_collector_url)"
-    if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+    if [ "$CLUSTER_MODE" = "in-cluster" ]; then
         if curl -s -o /dev/null --max-time 3 "$OTEL_CHECK_URL" 2>/dev/null; then
             echo "✓ Reachable"
         else
@@ -391,7 +377,7 @@ if [ "$MLFLOW_ENABLED" = "true" ]; then
     # Traces land in MLflow experiment 0 (Default).
     OTEL_ENDPOINT="$(otel_collector_url)"
     export OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_ENDPOINT"
-    if [ -n "$KUBERNETES_SERVICE_HOST" ]; then
+    if [ "$CLUSTER_MODE" = "in-cluster" ]; then
         export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
     else
         export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
