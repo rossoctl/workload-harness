@@ -782,6 +782,19 @@ else
     echo ""
 fi
 
+# Step 9.5: Fix route targetPort on OpenShift.
+# Kagenti creates the route with targetPort: 8080 (the service port number), but
+# OpenShift resolves targetPort by name when the service port has a name. The
+# service port is named "http", so "8080" doesn't resolve and the router returns
+# 503. Patch it to the port name so the route works.
+if [ "$CLUSTER_MODE" = "openshift" ]; then
+    kubectl patch route "$AGENT_NAME" -n "$NAMESPACE" \
+        --type=json \
+        -p='[{"op":"replace","path":"/spec/port/targetPort","value":"http"}]' \
+        2>/dev/null && echo "✓ Route targetPort patched to 'http'" \
+        || echo "Warning: Could not patch route targetPort (route may not exist yet)"
+fi
+
 # Step 10: Wait for agent to be ready.
 # Uses an HTTP health check (agent card endpoint) — kubectl is not available
 # inside the job container.

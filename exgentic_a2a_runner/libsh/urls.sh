@@ -51,7 +51,7 @@ tool_http_url() {
     local ns="${2:-team1}"
     case "$CLUSTER_MODE" in
         kind)       echo "http://${tool}.${ns}.localtest.me:8080" ;;
-        openshift)  echo "https://${tool}-mcp-${ns}.${INGRESS_DOMAIN}" ;;
+        openshift)  echo "https://${tool}-${ns}.${INGRESS_DOMAIN}" ;;
         in-cluster) echo "http://${tool}-mcp.${ns}.svc.cluster.local:8000" ;;
         *)          _urls_unsupported_mode "tool_http_url" ;;
     esac
