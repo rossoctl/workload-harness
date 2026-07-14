@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: exgentic-runner
+  namespace: team1
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      # Uses the default ServiceAccount — no kubectl / RBAC required.
+      # All cluster interaction goes through the Kagenti API and Keycloak over HTTP.
+      containers:
+        - name: runner
+          image: ghcr.io/exgentic/runner:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--benchmark"
+            - "gsm8k"
+            - "--agent"
+            - "tool_calling"
+            - "--model"
+            - "openai/Azure/gpt-4.1"
+          env:
+            - name: KEYCLOAK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kagenti-test-user
+                  key: password
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: apikey
+            - name: OPENAI_API_BASE
+              value: "https://ete-litellm.ai-models.vpc-int.res.ibm.com"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf-token
+                  optional: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"

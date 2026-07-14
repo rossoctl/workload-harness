@@ -9,8 +9,10 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from opentelemetry import metrics, trace
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter as OTLPMetricExporterGRPC
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter as OTLPSpanExporterGRPC
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter as OTLPMetricExporterHTTP
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as OTLPSpanExporterHTTP
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
@@ -82,12 +84,14 @@ class OTELInstrumentation:
         trace_provider = TracerProvider(resource=resource)
 
         if self.config.exporter_endpoint:
-            # Use OTLP exporter
-            logger.info(f"Configuring OTLP trace exporter: {self.config.exporter_endpoint}")
-            span_exporter = OTLPSpanExporter(
-                endpoint=self.config.exporter_endpoint,
-                insecure=self.config.exporter_insecure,
-            )
+            logger.info(f"Configuring OTLP trace exporter: {self.config.exporter_endpoint} (protocol: {self.config.exporter_protocol})")
+            if self.config.exporter_protocol == "http/protobuf":
+                span_exporter = OTLPSpanExporterHTTP(endpoint=self.config.exporter_endpoint + "/v1/traces")
+            else:
+                span_exporter = OTLPSpanExporterGRPC(
+                    endpoint=self.config.exporter_endpoint,
+                    insecure=self.config.exporter_insecure,
+                )
             trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
         else:
             # No exporter configured - traces will be collected but not exported
@@ -116,12 +120,14 @@ class OTELInstrumentation:
         metric_readers = []
 
         if self.config.exporter_endpoint:
-            # Use OTLP exporter
-            logger.info(f"Configuring OTLP metric exporter: {self.config.exporter_endpoint}")
-            metric_exporter = OTLPMetricExporter(
-                endpoint=self.config.exporter_endpoint,
-                insecure=self.config.exporter_insecure,
-            )
+            logger.info(f"Configuring OTLP metric exporter: {self.config.exporter_endpoint} (protocol: {self.config.exporter_protocol})")
+            if self.config.exporter_protocol == "http/protobuf":
+                metric_exporter = OTLPMetricExporterHTTP(endpoint=self.config.exporter_endpoint + "/v1/metrics")
+            else:
+                metric_exporter = OTLPMetricExporterGRPC(
+                    endpoint=self.config.exporter_endpoint,
+                    insecure=self.config.exporter_insecure,
+                )
             metric_reader = PeriodicExportingMetricReader(metric_exporter)
             metric_readers.append(metric_reader)
         else:
