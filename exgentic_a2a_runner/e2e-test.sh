@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Defaults
 AGENT_NAME=""
 TASKS="1"
-PARALLEL_SESSIONS=""
+MAX_PARALLEL_SESSIONS=""
 PARALLEL="false"
 IN_CLUSTER="false"
 DRY_RUN="false"
@@ -28,8 +28,8 @@ Required:
 
 Options:
   --benchmarks LIST      Comma-separated benchmarks to run (default: gsm8k,tau2,appworld)
-  --tasks N              Tasks per benchmark (default: 1; sets MAX_TASKS=N)
-  --parallel-sessions N  Concurrent sessions per benchmark (sets MAX_PARALLEL_SESSIONS=N)
+  --max-tasks N          Maximum number of tasks to evaluate (default: 1)
+  --max-parallel-sessions N  Concurrent sessions per benchmark (default: 1)
   --parallel-jobs        Run all benchmarks concurrently; collect all results
   --in-cluster           Submit a Kubernetes Job per benchmark instead of running locally
   --dry                  Forward --dry to deploy-and-evaluate.sh (no commands executed)
@@ -43,9 +43,9 @@ Examples:
   $0 --agent tool_calling
   $0 --agent tool_calling --benchmarks gsm8k
   $0 --agent tool_calling --benchmarks gsm8k,tau2
-  $0 --agent tool_calling --tasks 3
+  $0 --agent tool_calling --max-tasks 3
   $0 --agent tool_calling --parallel-jobs
-  $0 --agent tool_calling --parallel-sessions 4
+  $0 --agent tool_calling --max-parallel-sessions 4
   $0 --agent tool_calling --in-cluster
   $0 --agent tool_calling --dry
 EOF
@@ -61,12 +61,12 @@ while [[ $# -gt 0 ]]; do
             IFS=',' read -ra BENCHMARKS <<< "$2"
             shift 2
             ;;
-        --tasks)
+        --max-tasks)
             TASKS="$2"
             shift 2
             ;;
-        --parallel-sessions)
-            PARALLEL_SESSIONS="$2"
+        --max-parallel-sessions)
+            MAX_PARALLEL_SESSIONS="$2"
             shift 2
             ;;
         --parallel-jobs)
@@ -112,11 +112,10 @@ trap cleanup_tmp EXIT
 run_local() {
     local benchmark="$1"
     local log="$2"
-    local -a env_prefix=(MAX_TASKS="$TASKS")
-    [ -n "$PARALLEL_SESSIONS" ] && env_prefix+=(MAX_PARALLEL_SESSIONS="$PARALLEL_SESSIONS")
-    env "${env_prefix[@]}" "$SCRIPT_DIR/deploy-and-evaluate.sh" \
-        --benchmark "$benchmark" \
-        --agent "$AGENT_NAME" \
+    local -a run_args=(--benchmark "$benchmark" --agent "$AGENT_NAME" --max-tasks "$TASKS")
+    [ -n "$MAX_PARALLEL_SESSIONS" ] && run_args+=(--max-parallel-sessions "$MAX_PARALLEL_SESSIONS")
+    "$SCRIPT_DIR/deploy-and-evaluate.sh" \
+        "${run_args[@]}" \
         "${EXTRA_ARGS[@]}" \
         2>&1 | tee "$log"
     return "${PIPESTATUS[0]}"
@@ -160,7 +159,7 @@ run_k8s() {
 
     # Rewrite job.yaml with a unique name, updated args, and MAX_TASKS / MAX_PARALLEL_SESSIONS env vars.
     python3 - "$SCRIPT_DIR/k8s/job.yaml" "$job_yaml" \
-        "$job_name" "$args_json" "$TASKS" "${PARALLEL_SESSIONS:-}" <<'PYEOF'
+        "$job_name" "$args_json" "$TASKS" "${MAX_PARALLEL_SESSIONS:-}" <<'PYEOF'
 import sys, yaml, json
 
 src, dst, job_name, args_json, max_tasks, parallel_sessions = sys.argv[1:]
@@ -243,7 +242,7 @@ run_benchmark() {
 
 # parse_stats BENCHMARK
 # Reads $TMPDIR_E2E/<benchmark>.log and emits tab-separated fields:
-#   BENCHMARK STATUS TASKS PARALLEL_SESSIONS EVAL_SUCCESS_RATE AVG_LATENCY FAILURES
+#   BENCHMARK STATUS TASKS MAX_PARALLEL_SESSIONS EVAL_SUCCESS_RATE AVG_LATENCY FAILURES
 parse_stats() {
     local benchmark="$1"
     local log="$TMPDIR_E2E/${benchmark}.log"
@@ -260,7 +259,7 @@ parse_stats() {
     fi
 
     local tasks_col="$TASKS"
-    local parallel_sessions_col="${PARALLEL_SESSIONS:---}"
+    local parallel_sessions_col="${MAX_PARALLEL_SESSIONS:---}"
     local eval_rate="--"
     local avg_latency="--"
     local failures="--"
@@ -352,7 +351,7 @@ print_table() {
 # ------------------------------------------------------------------
 
 echo "=========================================="
-echo "E2E Test: agent=$AGENT_NAME tasks=$TASKS${PARALLEL_SESSIONS:+ parallel-sessions=$PARALLEL_SESSIONS}"
+echo "E2E Test: agent=$AGENT_NAME tasks=$TASKS${MAX_PARALLEL_SESSIONS:+ max-parallel-sessions=$MAX_PARALLEL_SESSIONS}"
 echo "Mode: $([ "$IN_CLUSTER" = "true" ] && echo in-cluster || echo local) / $([ "$PARALLEL" = "true" ] && echo parallel-jobs || echo sequential)"
 echo "=========================================="
 echo ""

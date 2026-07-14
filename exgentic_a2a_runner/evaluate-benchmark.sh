@@ -16,6 +16,8 @@ OTEL_COLLECTOR_NAMESPACE="kagenti-system"
 OTEL_COLLECTOR_SERVICE="otel-collector"
 OTEL_COLLECTOR_LOCAL_PORT="${OTEL_COLLECTOR_LOCAL_PORT:-4327}"
 CLUSTER_MODE=""
+MAX_TASKS="${MAX_TASKS:-1}"
+MAX_PARALLEL_SESSIONS="${MAX_PARALLEL_SESSIONS:-1}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,14 @@ while [[ $# -gt 0 ]]; do
             USE_MCP_GATEWAY="true"
             shift
             ;;
+        --max-tasks)
+            MAX_TASKS="$2"
+            shift 2
+            ;;
+        --max-parallel-sessions)
+            MAX_PARALLEL_SESSIONS="$2"
+            shift 2
+            ;;
         --kind)
             CLUSTER_MODE="kind"
             shift
@@ -62,6 +72,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --experiment NAME          Experiment name for grouping/filtering runs (default: default)"
+            echo "  --max-tasks N              Maximum number of tasks to evaluate (default: 1)"
+            echo "  --max-parallel-sessions N  Number of concurrent evaluation sessions (default: 1)"
             echo "  --disable-mlflow           Disable MLflow tracing via OTEL collector (default: enabled)"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --kind                     Target a local Kind cluster (default)"
@@ -138,6 +150,8 @@ echo "Exgentic A2A Runner - Benchmark Evaluation"
 echo "=========================================="
 echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent Service: $AGENT_SERVICE"
+echo "Max Tasks: $MAX_TASKS"
+echo "Max Parallel Sessions: $MAX_PARALLEL_SESSIONS"
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     echo "MCP via Gateway: $MCP_GATEWAY_SERVICE.$MCP_GATEWAY_NAMESPACE:$MCP_GATEWAY_PORT"
 else
@@ -364,6 +378,10 @@ fi
 export BENCHMARK_NAME="$BENCHMARK_NAME"
 export AGENT_NAME="$AGENT_NAME"
 export EXPERIMENT_NAME="$EXPERIMENT_NAME"
+
+# Export task/concurrency limits for the Python runner
+export MAX_TASKS="$MAX_TASKS"
+export MAX_PARALLEL_SESSIONS="$MAX_PARALLEL_SESSIONS"
 
 # Export Prometheus config for infra metrics collection
 export PROMETHEUS_URL="$(prometheus_url)"

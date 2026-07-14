@@ -39,6 +39,8 @@ MODEL_NAME="openai/Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
 MLFLOW_ENABLED="true"
+MAX_TASKS="${MAX_TASKS:-1}"
+MAX_PARALLEL_SESSIONS="${MAX_PARALLEL_SESSIONS:-1}"
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"
 USE_LOCAL_IMAGE="false"
 DRY_RUN="false"
@@ -76,6 +78,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keycloak-pass)
             KEYCLOAK_PASSWORD="$2"
+            shift 2
+            ;;
+        --max-tasks)
+            MAX_TASKS="$2"
+            shift 2
+            ;;
+        --max-parallel-sessions)
+            MAX_PARALLEL_SESSIONS="$2"
             shift 2
             ;;
         --disable-mlflow)
@@ -135,6 +145,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --model MODEL              Model name (default: openai/Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (default: admin)"
+            echo "  --max-tasks N              Maximum number of tasks to evaluate (default: 1)"
+            echo "  --max-parallel-sessions N  Number of concurrent evaluation sessions (default: 1)"
             echo "  --disable-mlflow           Disable MLflow tracing via OTEL collector during evaluation (default: enabled)"
             echo "  --use-mcp-gateway          Route MCP traffic through the MCP Gateway"
             echo "  --local-image              Use locally built images instead of pulling from registry"
@@ -199,6 +211,8 @@ echo "=========================================="
 echo "Benchmark: $BENCHMARK_NAME"
 echo "Agent: $AGENT_NAME"
 echo "Model: $MODEL_NAME"
+echo "Max Tasks: $MAX_TASKS"
+echo "Max Parallel Sessions: $MAX_PARALLEL_SESSIONS"
 echo "Keycloak User: $KEYCLOAK_USERNAME"
 echo "MLflow tracing: $MLFLOW_ENABLED"
 echo "MCP Gateway: $USE_MCP_GATEWAY"
@@ -331,6 +345,8 @@ if [ "$DRY_RUN" = "true" ]; then
         --benchmark "$BENCHMARK_NAME" \
         --agent "$AGENT_NAME" \
         --experiment "$EXPERIMENT_NAME" \
+        --max-tasks "$MAX_TASKS" \
+        --max-parallel-sessions "$MAX_PARALLEL_SESSIONS" \
         "${CLUSTER_FLAG[@]}")
     if [ "$MLFLOW_ENABLED" = "false" ]; then
         EVALUATE_CMD_DISPLAY="$EVALUATE_CMD_DISPLAY$(printf '%q ' --disable-mlflow)"
@@ -342,6 +358,7 @@ if [ "$DRY_RUN" = "true" ]; then
     echo ""
 else
     EVALUATE_ARGS=(--benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" --experiment "$EXPERIMENT_NAME")
+    EVALUATE_ARGS+=(--max-tasks "$MAX_TASKS" --max-parallel-sessions "$MAX_PARALLEL_SESSIONS")
     if [ "$MLFLOW_ENABLED" = "false" ]; then
         EVALUATE_ARGS+=(--disable-mlflow)
     fi
