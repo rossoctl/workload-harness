@@ -174,12 +174,11 @@ flowchart LR
 
 ## 3. `deploy-agent.sh` — deploy the A2A agent
 
-Same auth pattern as the benchmark. Chooses **deployment type from the agent
-name**: `generic_agent` → build from source (git), anything else → pull a
-prebuilt image. Injects MCP URL (direct or gateway), LLM config, OTEL, and
-runner env; resolves the AuthBridge plugin pipeline (Python helper) and, if any
-selector was supplied, injects the sidecar + applies the pipeline overlay.
-Waits on the agent-card endpoint for readiness.
+Same auth pattern as the benchmark. Pulls a prebuilt image for the named
+agent. Injects MCP URL (direct or gateway), LLM config, OTEL, and runner env;
+resolves the AuthBridge plugin pipeline (Python helper) and, if any selector
+was supplied, injects the sidecar + applies the pipeline overlay. Waits on
+the agent-card endpoint for readiness.
 
 ### 3.1 Interaction diagram
 
@@ -195,8 +194,8 @@ sequenceDiagram
     participant AG as Agent pod
     participant AP as apply-pipeline.sh
 
-    note over Agent: name==generic_agent → source build,<br/>else → image (exgentic-a2a-name-bench)
-    opt image + --local-image
+    note over Agent: image (exgentic-a2a-{agent}-{bench})
+    opt --local-image
         Agent->>K8s: sync-image-to-cluster.sh
     end
     Agent->>KC: health + admin token + enable DAG + password grant
@@ -223,11 +222,7 @@ sequenceDiagram
     Agent->>KAG: POST /api/v1/agents {source|image spec,<br/>envVars, createHttpRoute, authBridgeEnabled}
     KAG-->>Agent: HTTP 2xx (409 = abort)
 
-    alt source deployment
-        loop until Succeeded (≤5min)
-            Agent->>K8s: get buildrun status
-        end
-    else image + --local-image
+    opt --local-image
         Agent->>K8s: patch imagePullPolicy=IfNotPresent
     end
     opt openshift
@@ -261,7 +256,7 @@ flowchart LR
     A -->|build/patch/secrets/resources| KUBE[(kubectl → cluster)]
     A -->|overlay| AP[authbridge/apply-pipeline.sh]
 
-    KAG -->|source: BuildRun / image: Deployment| AG[exgentic-a2a-agent-bench pod]
+    KAG -->|image: Deployment| AG[exgentic-a2a-agent-bench pod]
     AP -.->|configures| SC[AuthBridge sidecar]
     SC --- AG
     A -->|health: /.well-known/agent-card.json| AG

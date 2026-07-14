@@ -1,7 +1,6 @@
 #!/bin/bash
 # Deploy and Configure agent to Kagenti cluster via API
 # Usage: ./deploy-agent.sh --benchmark <name> --agent <name> [OPTIONS]
-# Example: ./deploy-agent.sh --benchmark gsm8k --agent generic_agent
 # Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini
 # Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --openshift apps.mycluster.example.com
 
@@ -117,14 +116,14 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Required Arguments:"
             echo "  --benchmark NAME           Benchmark name (e.g., gsm8k, tau2)"
-            echo "  --agent NAME               Agent name (e.g., tool_calling, generic_agent)"
+            echo "  --agent NAME               Agent name (e.g., tool_calling)"
             echo ""
             echo "Optional Arguments:"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Connect agent to MCP Gateway instead of direct MCP server"
-            echo "  --local-image              Use locally built image instead of pulling from registry (image deployments only)"
+            echo "  --local-image              Use locally built image instead of pulling from registry"
             echo "  --kind                     Target a local Kind cluster (default)"
             echo "  --openshift DOMAIN         Target an OpenShift cluster with the given ingress domain"
             echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
@@ -148,7 +147,6 @@ while [[ $# -gt 0 ]]; do
             echo "  TOKEN_BROKER_AUDIENCE        Broker audience (token-broker plugin)"
             echo ""
             echo "Examples:"
-            echo "  $0 --benchmark gsm8k --agent generic_agent"
             echo "  $0 --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini"
             echo "  $0 --benchmark tau2 --agent tool_calling --use-mcp-gateway"
             echo "  $0 --benchmark tau2 --agent tool_calling --plugin-preset auth-only"
@@ -176,27 +174,21 @@ if [ -z "$BENCHMARK_NAME" ] || [ -z "$AGENT_NAME_INPUT" ]; then
     exit 1
 fi
 
-# Determine deployment type based on agent name
-if [ "$AGENT_NAME_INPUT" = "generic_agent" ]; then
-    DEPLOYMENT_TYPE="source"
-    AGENT_NAME="generic-agent-internal-${BENCHMARK_NAME}"
+# Determine agent name and image
+# Automatically add exgentic-a2a- prefix if not already present
+if [[ "$AGENT_NAME_INPUT" == exgentic-a2a-* ]]; then
+    FULL_AGENT_NAME="$AGENT_NAME_INPUT"
 else
-    DEPLOYMENT_TYPE="image"
-    # Automatically add exgentic-a2a- prefix if not already present
-    if [[ "$AGENT_NAME_INPUT" == exgentic-a2a-* ]]; then
-        FULL_AGENT_NAME="$AGENT_NAME_INPUT"
-    else
-        FULL_AGENT_NAME="exgentic-a2a-${AGENT_NAME_INPUT}"
-    fi
-    # Replace underscores with hyphens for Kubernetes compatibility
-    AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
-    AGENT_NAME="${AGENT_NAME//_/-}"
-
-    # Default to Exgentic registry, can be overridden with environment variable
-    EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
-    IMAGE_TAG="${IMAGE_TAG:-latest}"
-    REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
+    FULL_AGENT_NAME="exgentic-a2a-${AGENT_NAME_INPUT}"
 fi
+# Replace underscores with hyphens for Kubernetes compatibility
+AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
+AGENT_NAME="${AGENT_NAME//_/-}"
+
+# Default to Exgentic registry, can be overridden with environment variable
+EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 NAMESPACE="team1"
@@ -215,25 +207,19 @@ KAGENTI_API="$(kagenti_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
 
 echo "=========================================="
-if [ "$DEPLOYMENT_TYPE" = "source" ]; then
-    echo "Deploying Generic Agent: $AGENT_NAME"
-else
-    echo "Deploying Exgentic Agent: $AGENT_NAME"
-    echo "From image: $REMOTE_IMAGE_NAME"
-fi
+echo "Deploying Exgentic Agent: $AGENT_NAME"
+echo "From image: $REMOTE_IMAGE_NAME"
 echo "Model: $MODEL_NAME"
 echo "=========================================="
 echo ""
 
-# Step 0: Sync local image to cluster (image deployments only)
-if [ "$DEPLOYMENT_TYPE" = "image" ]; then
-    if [ "$USE_LOCAL_IMAGE" = "true" ]; then
-        echo "Step 0: Syncing local image to cluster..."
-        export REMOTE_IMAGE_NAME KIND_CLUSTER_NAME="kagenti"
-        source "$(dirname "$0")/sync-image-to-cluster.sh"
-    else
-        echo "Step 0: Syncing local image to cluster... (skipped, K8s will pull from remote registry)"
-    fi
+# Step 0: Sync local image to cluster
+if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+    echo "Step 0: Syncing local image to cluster..."
+    export REMOTE_IMAGE_NAME KIND_CLUSTER_NAME="kagenti"
+    source "$(dirname "$0")/sync-image-to-cluster.sh"
+else
+    echo "Step 0: Syncing local image to cluster... (skipped, K8s will pull from remote registry)"
 fi
 
 IMAGE_NAME="$REMOTE_IMAGE_NAME"
@@ -454,13 +440,7 @@ echo ""
 # Step 6: Fetch and parse environment variables
 echo "Step 6: Fetching environment variables..."
 
-if [ "$DEPLOYMENT_TYPE" = "source" ]; then
-    # Generic agent - fetch from agent-examples repo
-    ENV_FILE_URL="https://raw.githubusercontent.com/kagenti/agent-examples/refs/heads/main/a2a/generic_agent/.env.openai"
-else
-    # Exgentic agent - fetch env file for specific agent
-    ENV_FILE_URL="https://raw.githubusercontent.com/yoavkatz/agent-examples/refs/heads/feature/exgentic-mcp-server/a2a/exgentic_agent/.env.example"
-fi
+ENV_FILE_URL="https://raw.githubusercontent.com/yoavkatz/agent-examples/refs/heads/feature/exgentic-mcp-server/a2a/exgentic_agent/.env.example"
 
 ENV_CONTENT=$(curl -s "$ENV_FILE_URL")
 
@@ -491,7 +471,7 @@ echo ""
 # Step 7: Prepare environment variables for deployment
 echo "Step 7: Preparing environment variables for deployment..."
 
-# Add MCP_URL(S) to environment variables
+# Add MCP_URL to environment variables
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_URL="$(mcp_gateway_url)/mcp"
     echo "Using MCP Gateway URL: $MCP_URL"
@@ -500,13 +480,7 @@ else
     echo "Using MCP service URL: $MCP_URL"
 fi
 
-if [ "$DEPLOYMENT_TYPE" = "source" ]; then
-    # Generic agent uses MCP_URLS
-    ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"MCP_URLS\", \"value\": \"$MCP_URL\"}]")
-else
-    # Exgentic agent uses MCP_URL
-    ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"MCP_URL\", \"value\": \"$MCP_URL\"}]")
-fi
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"MCP_URL\", \"value\": \"$MCP_URL\"}]")
 
 # Add runtime configuration environment variables
 if [ -n "$OPENAI_API_BASE" ]; then
@@ -640,38 +614,7 @@ PYEOF
     ) || exit 1
 fi
 
-if [ "$DEPLOYMENT_TYPE" = "source" ]; then
-    # Deploy generic agent from source
-    AGENT_JSON=$(cat <<EOF
-{
-  "name": "$AGENT_NAME",
-  "namespace": "$NAMESPACE",
-  "gitUrl": "https://github.com/kagenti/agent-examples",
-  "gitPath": "a2a/generic_agent",
-  "gitBranch": "main",
-  "imageTag": "latest",
-  "protocol": "a2a",
-  "framework": "custom",
-  "deploymentMethod": "source",
-  "workloadType": "deployment",
-  "envVars": $ENV_VARS_WITH_CONFIG,
-  "servicePorts": [
-    {
-      "name": "http",
-      "port": 8080,
-      "targetPort": 8000,
-      "protocol": "TCP"
-    }
-  ],
-  "createHttpRoute": true,
-  "authBridgeEnabled": $AUTHBRIDGE_ENABLED,
-  "spireEnabled": false
-}
-EOF
-)
-else
-    # Deploy exgentic agent from image
-    AGENT_JSON=$(cat <<EOF
+AGENT_JSON=$(cat <<EOF
 {
   "name": "$AGENT_NAME",
   "namespace": "$NAMESPACE",
@@ -699,7 +642,6 @@ else
 }
 EOF
 )
-fi
 
 echo "Agent configuration:"
 echo "$AGENT_JSON" | jq '.'
@@ -733,54 +675,16 @@ fi
 
 echo ""
 
-# Step 9: Wait for build to complete (only for source deployments)
-if [ "$DEPLOYMENT_TYPE" = "source" ]; then
-    echo "Step 9: Waiting for build to complete..."
-    BUILD_RUN_NAME=$(echo "$RESPONSE" | jq -r '.message' | grep -o "BuildRun: '[^']*'" | sed "s/BuildRun: '\([^']*\)'/\1/")
-    
-    if [ -z "$BUILD_RUN_NAME" ]; then
-        echo "Warning: Could not extract BuildRun name from response"
-        echo "Response: $RESPONSE"
-        echo "Skipping build wait"
-    else
-        echo "Monitoring BuildRun: $BUILD_RUN_NAME"
-        
-        # Wait up to 5 minutes for build to complete
-        for i in {1..60}; do
-            BUILD_STATUS=$(kubectl get buildrun "$BUILD_RUN_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || echo "Unknown")
-            BUILD_REASON=$(kubectl get buildrun "$BUILD_RUN_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}' 2>/dev/null || echo "Unknown")
-            
-            if [ "$BUILD_STATUS" = "True" ]; then
-                echo "✓ Build completed successfully"
-                break
-            elif [ "$BUILD_STATUS" = "False" ]; then
-                echo "✗ Build failed with reason: $BUILD_REASON"
-                echo "Check logs with: kubectl logs -n $NAMESPACE -l buildrun.shipwright.io/name=$BUILD_RUN_NAME"
-                exit 1
-            fi
-            
-            echo "  Build in progress... ($i/60)"
-            sleep 5
-        done
-        
-        if [ "$BUILD_STATUS" != "True" ]; then
-            echo "✗ Build did not complete within 5 minutes"
-            exit 1
-        fi
-    fi
-    echo ""
+# Step 9: Conditionally patch imagePullPolicy
+if [ "$USE_LOCAL_IMAGE" = "true" ]; then
+    echo "Step 9: Patching imagePullPolicy to IfNotPresent..."
+    sleep 2  # Give the deployment a moment to be created
+    kubectl patch deployment $AGENT_NAME -n $NAMESPACE -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent","imagePullPolicy":"IfNotPresent"}]}}}}' 2>/dev/null || echo "Warning: Could not patch imagePullPolicy"
+    echo "✓ ImagePullPolicy patched"
 else
-    # For image deployments, conditionally patch imagePullPolicy
-    if [ "$USE_LOCAL_IMAGE" = "true" ]; then
-        echo "Step 9: Patching imagePullPolicy to IfNotPresent..."
-        sleep 2  # Give the deployment a moment to be created
-        kubectl patch deployment $AGENT_NAME -n $NAMESPACE -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent","imagePullPolicy":"IfNotPresent"}]}}}}' 2>/dev/null || echo "Warning: Could not patch imagePullPolicy"
-        echo "✓ ImagePullPolicy patched"
-    else
-        echo "Step 9: Patching imagePullPolicy... (skipped, K8s will pull from remote registry)"
-    fi
-    echo ""
+    echo "Step 9: Patching imagePullPolicy... (skipped, K8s will pull from remote registry)"
 fi
+echo ""
 
 # Step 9.5: Fix route targetPort on OpenShift.
 # Kagenti creates the route with targetPort: 8080 (the service port number), but
