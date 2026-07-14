@@ -29,7 +29,7 @@ check_kubectl_context() {
 
     if ! "$KUBECTL_BIN" cluster-info >/dev/null 2>&1; then
         echo "Error: kubectl context '$CURRENT_CONTEXT' is not reachable"
-        echo "Hint: refresh your cluster access or set KUBECTL_BIN to another kubectl wrapper"
+        echo "Hint: refresh your cluster access (with oc login)"
         exit 1
     fi
 
