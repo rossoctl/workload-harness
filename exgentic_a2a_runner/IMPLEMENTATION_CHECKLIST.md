@@ -41,7 +41,6 @@
 - [x] Proper initialization and shutdown
 
 ### A2A Client (`a2a_client.py`)
-- [x] Copied from `appworld_a2a_runner`
 - [x] `A2AProxyClient` class for agent communication
 - [x] Agent card discovery
 - [x] JSON-RPC protocol implementation
@@ -67,7 +66,7 @@
   - [x] `exgentic_a2a_evaluation_latency_ms` histogram
   - [x] `exgentic_a2a_session_creation_latency_ms` histogram
   - [x] `exgentic_a2a_inflight_sessions` gauge
-- [x] Reused metrics from appworld:
+- [x] Additional metrics:
   - [x] `exgentic_a2a_a2a_latency_ms` histogram
   - [x] `exgentic_a2a_prompt_size_chars` histogram
   - [x] `exgentic_a2a_response_size_chars` histogram
@@ -111,7 +110,6 @@
   - [x] Usage examples
   - [x] Output format documentation
   - [x] OpenTelemetry metrics/traces documentation
-  - [x] Comparison with appworld_a2a_runner
   - [x] Execution flow diagram
   - [x] Troubleshooting guide
 - [x] Example environment file with all variables
@@ -167,7 +165,7 @@
 5. **Comprehensive Telemetry**: ✅ Traces, metrics, and logs
 6. **Environment Configuration**: ✅ All settings via env vars
 7. **Error Handling**: ✅ Graceful degradation and cleanup
-8. **Reusable Components**: ✅ A2A client and OTEL base from appworld
+8. **Reusable Components**: ✅ A2A client and OTEL base extracted for reuse
 
 ## 🔍 Code Quality
 
@@ -177,7 +175,6 @@
 - [x] Logging at appropriate levels
 - [x] Error messages with context
 - [x] Clean separation of concerns
-- [x] Follows appworld_a2a_runner patterns
 
 ## 📊 Testing Readiness
 
@@ -202,7 +199,6 @@ All components have been successfully implemented following the requirements fro
 - ✅ Communicates with Kagenti agents via A2A
 - ✅ Implements the exact execution model specified
 - ✅ Provides comprehensive observability
-- ✅ Follows the appworld_a2a_runner pattern
 - ✅ Is fully documented and ready for deployment
 
 The implementation is **COMPLETE** and ready for integration testing with actual Exgentic MCP server and Kagenti agents.
