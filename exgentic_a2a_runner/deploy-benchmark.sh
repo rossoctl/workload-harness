@@ -15,6 +15,7 @@ BENCHMARK_NAME=""
 USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
 CLUSTER_MODE=""
+ACTION_TIMEOUT="1000"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             USE_LOCAL_IMAGE="true"
             shift
             ;;
+        --action-timeout)
+            ACTION_TIMEOUT="$2"
+            shift 2
+            ;;
         --kind)
             CLUSTER_MODE="kind"
             shift
@@ -64,6 +69,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Optional Arguments:"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
+            echo "  --action-timeout SECONDS   Per-action step timeout in seconds (default: 30)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Register MCP server with the MCP Gateway"
@@ -420,6 +426,11 @@ if [[ "$BENCHMARK_NAME" == "gsm8k" ]]; then
     ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"EXGENTIC_SET_BENCHMARK_RUNNER\", \"value\": \"direct\"}]")
 fi
 
+if [ -n "$ACTION_TIMEOUT" ]; then
+    echo "Adding EXGENTIC_SET_BENCHMARK_ACTION_TIMEOUT=$ACTION_TIMEOUT"
+    ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"EXGENTIC_SET_BENCHMARK_ACTION_TIMEOUT\", \"value\": \"$ACTION_TIMEOUT\"}]")
+fi
+
 echo "✓ Environment variables prepared for deployment"
 echo ""
 
@@ -513,7 +524,7 @@ MCP_URL="$(tool_http_url "$TOOL_NAME" "$NAMESPACE")"
 echo "  MCP URL: $MCP_URL"
 
 MCP_READY=false
-MCP_MAX_WAIT=180
+MCP_MAX_WAIT=300
 for i in $(seq 1 $MCP_MAX_WAIT); do
     MCP_HTTP_CODE=$(curl -s -o /tmp/mcp_health_response.txt -w "%{http_code}" --max-time 3 \
         -X POST "$MCP_URL/mcp" \
@@ -672,6 +683,9 @@ echo "Benchmark configuration:"
 echo "  Deployment: $TOOL_NAME"
 echo "  Namespace: $NAMESPACE"
 echo "  Model: $MODEL_NAME"
+if [ -n "$ACTION_TIMEOUT" ]; then
+    echo "  Action Timeout: ${ACTION_TIMEOUT}s"
+fi
 if [ -n "$OPENAI_API_BASE" ]; then
     echo "  Memory Limit: 3Gi"
     echo "  OPENAI_API_BASE: $OPENAI_API_BASE"
