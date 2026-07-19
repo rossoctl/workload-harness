@@ -1,0 +1,2 @@
+sparc:
+  on_reject_action: "observe"

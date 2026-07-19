@@ -135,14 +135,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --in-cluster               Running as a Kubernetes Job inside the cluster"
             echo ""
             echo "AuthBridge plugin pipeline (see AUTHBRIDGE_PIPELINE_SPEC.md):"
-            echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | full"
+            echo "  --plugin-preset PRESET     Named bundle: auth-only | ibac-only | sparc-only | full"
             echo "  --plugin NAME[:POLICY]     Enable plugin; POLICY ∈ {enforce(default), observe, off}; repeatable"
             echo "  --no-plugin NAME           Shorthand for --plugin NAME:off; repeatable"
             echo "  --plugin-config-file PATH  Flat-map YAML overlay merged after selectors"
             echo "  -h, --help                 Show this help message"
             echo ""
             echo "Plugin names: jwt-validation, token-exchange, token-broker, a2a-parser,"
-            echo "              mcp-parser, inference-parser, ibac"
+            echo "              mcp-parser, inference-parser, sparc, ibac"
             echo ""
             echo "Plugin tunables (consumed when the named plugin is in the active set):"
             echo "  IBAC_JUDGE_ENDPOINT          Judge LLM base URL (default: http://host.docker.internal:11434)"
@@ -556,6 +556,12 @@ ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGE
 echo "Adding LITELLM_LOCAL_MODEL_COST_MAP=True"
 ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"LITELLM_LOCAL_MODEL_COST_MAP\", \"value\": \"True\"}]")
 
+# Disable LiteLLM response caching. The exgentic default is litellm_caching=True.
+# Cached runs complete in ~3.6s with no real LLM/tool calls, so inference-parser
+# never captures the conversation context and SPARC/IBAC never fire.
+echo "Adding EXGENTIC_LITELLM_CACHING=false"
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_LITELLM_CACHING\", \"value\": \"false\"}]")
+
 echo "✓ Environment variables prepared for deployment"
 echo ""
 
@@ -590,7 +596,7 @@ import os, sys
 import yaml
 
 KNOWN = ["jwt-validation", "token-exchange", "token-broker",
-         "a2a-parser", "mcp-parser", "inference-parser", "ibac"]
+         "a2a-parser", "mcp-parser", "inference-parser", "sparc", "ibac"]
 VALID = ("enforce", "observe", "off")
 CHAIN = {p: ("inbound" if p in ("a2a-parser", "jwt-validation") else "outbound")
          for p in KNOWN}
@@ -605,7 +611,7 @@ if preset:
     pdir = os.environ.get("PRESETS_DIR", "")
     pfile = os.path.join(pdir, f"{preset}.yaml")
     if not os.path.isfile(pfile):
-        die(f"unknown preset '{preset}' (looked for {pfile}); available: auth-only, ibac-only, full")
+        die(f"unknown preset '{preset}' (looked for {pfile}); available: auth-only, ibac-only, sparc-only, full")
     with open(pfile) as f:
         d = yaml.safe_load(f) or {}
     for chain in ("inbound", "outbound"):
@@ -905,12 +911,27 @@ fi
 
 echo ""
 
-# Step 11.4: Apply the AuthBridge plugin pipeline overlay (if any
-# plugin selector was supplied). The operator base config enables every
-# supported plugin; this overlay sets on_error: off on the ones we
-# didn't select and tunes config on the ones we did.
+# Step 11.4: Enable TLS bridge on AgentRuntime. We set this on the CR so the
+# operator provisions the cert-manager CA secret. The actual tls_bridge config
+# is injected directly into the ConfigMap in Step 11.5 to avoid race conditions
+# with the operator's reconciliation loop.
 if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
-    echo "Step 11.4: Applying AuthBridge pipeline overlay..."
+    echo "Step 11.4: Enabling TLS bridge on AgentRuntime..."
+    if kubectl patch agentruntime -n "$NAMESPACE" "$AGENT_NAME" --type=merge -p '{"spec":{"tlsBridgeMode":"enabled"}}' 2>/dev/null; then
+        echo "  ✓ tlsBridgeMode=enabled (CA will be provisioned by cert-manager)"
+    else
+        echo "  Warning: Could not patch AgentRuntime tlsBridgeMode (CR may not exist yet)"
+    fi
+    echo ""
+fi
+
+# Step 11.5: Apply the AuthBridge plugin pipeline overlay AFTER the TLS bridge
+# rollout has settled. The operator has now written its base ConfigMap; this
+# overlay patches the plugin selection on top without triggering another rollout.
+# Also injects tls_bridge config directly into the ConfigMap — the operator does
+# not reliably write this even when tlsBridgeMode=enabled is set on AgentRuntime.
+if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
+    echo "Step 11.5: Applying AuthBridge pipeline overlay..."
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     if [ ! -x "$SCRIPT_DIR/authbridge/apply-pipeline.sh" ]; then
         echo "Error: $SCRIPT_DIR/authbridge/apply-pipeline.sh not found or not executable"
@@ -929,6 +950,18 @@ if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
         TOKEN_BROKER_URL="${TOKEN_BROKER_URL:-}" \
         TOKEN_BROKER_AUDIENCE="${TOKEN_BROKER_AUDIENCE:-}" \
         "$SCRIPT_DIR/authbridge/apply-pipeline.sh"
+
+    # Inject tls_bridge section directly into the ConfigMap. The authbridge
+    # filesystem-watch reloader picks this up without a pod restart.
+    echo "  Injecting tls_bridge into authbridge ConfigMap..."
+    CM_NAME="authbridge-config-$AGENT_NAME"
+    CURRENT_CONFIG=$(kubectl -n "$NAMESPACE" get configmap "$CM_NAME" -o jsonpath='{.data.config\.yaml}')
+    NEW_CONFIG=$(printf '%s\ntls_bridge:\n  ca_dir: /etc/authbridge/tls-bridge-ca\n  mode: enabled\n' "$CURRENT_CONFIG")
+    TMP_TLS=$(mktemp)
+    printf '%s' "$NEW_CONFIG" >"$TMP_TLS"
+    kubectl -n "$NAMESPACE" create configmap "$CM_NAME" --from-file=config.yaml="$TMP_TLS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    rm -f "$TMP_TLS"
+    echo "  ✓ tls_bridge injected into $CM_NAME"
     echo ""
 fi
 

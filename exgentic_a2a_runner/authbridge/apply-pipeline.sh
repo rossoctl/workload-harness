@@ -79,6 +79,11 @@ JWT_VALIDATION_KEYCLOAK_URL="${JWT_VALIDATION_KEYCLOAK_URL:-$(_ab_base_key KEYCL
 JWT_VALIDATION_KEYCLOAK_REALM="${JWT_VALIDATION_KEYCLOAK_REALM:-$(_ab_base_key KEYCLOAK_REALM)}"
 export JWT_VALIDATION_ISSUER JWT_VALIDATION_KEYCLOAK_URL JWT_VALIDATION_KEYCLOAK_REALM
 
+# --- SPARC defaults (consumed only when sparc is in the resolved set).
+SPARC_REFLECTOR_ENDPOINT="${SPARC_REFLECTOR_ENDPOINT:-http://sparc-service.rossoctl-system.svc.cluster.local:8090}"
+SPARC_TIMEOUT_MS="${SPARC_TIMEOUT_MS:-30000}"
+export SPARC_REFLECTOR_ENDPOINT SPARC_TIMEOUT_MS
+
 echo "Applying AuthBridge pipeline to $NAMESPACE/$AGENT_NAME"
 echo "  Plugins: $PIPELINE_PLUGINS"
 if [ -n "${PIPELINE_OVERLAY_FILE:-}" ]; then
@@ -113,7 +118,7 @@ fi
 
 # --- Pre-flight: validate plugin names in PIPELINE_PLUGINS up front so
 # we fail before any kubectl call.
-KNOWN_PLUGINS=(jwt-validation token-exchange token-broker a2a-parser mcp-parser inference-parser ibac)
+KNOWN_PLUGINS=(jwt-validation token-exchange token-broker a2a-parser mcp-parser inference-parser sparc ibac)
 VALID_POLICIES=(enforce observe off)
 is_known() { local needle=$1; shift; for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done; return 1; }
 for tok in $PIPELINE_PLUGINS; do
