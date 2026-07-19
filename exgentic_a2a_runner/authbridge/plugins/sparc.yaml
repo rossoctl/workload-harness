@@ -12,5 +12,3 @@ config:
   deny_score_threshold: 0
   fail_policy: "open"
   timeout_ms: ${SPARC_TIMEOUT_MS}
-  strip_tool_args:
-    - session_id
