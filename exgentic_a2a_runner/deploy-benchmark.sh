@@ -539,7 +539,7 @@ else
     echo ""
 
     echo "Step 11.2: Waiting for deployment to stabilize..."
-    kubectl rollout status deployment/$TOOL_NAME -n $NAMESPACE --timeout=120s
+    kubectl rollout status deployment/$TOOL_NAME -n $NAMESPACE --timeout=360s
     echo "✓ Deployment stable"
 fi
 
