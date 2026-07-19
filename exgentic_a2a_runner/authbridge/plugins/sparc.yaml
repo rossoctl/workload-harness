@@ -8,7 +8,7 @@ config:
   reflector_endpoint: "${SPARC_REFLECTOR_ENDPOINT}"
   enforcement: "mcp"
   track: "fast_track"
-  on_reject_action: "reflect"
+  on_reject_action: "observe"
   deny_score_threshold: 0
   fail_policy: "open"
   timeout_ms: ${SPARC_TIMEOUT_MS}
