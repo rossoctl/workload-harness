@@ -123,7 +123,7 @@ EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/exgentic-mcp-${BENCHMARK_NAME}:${IMAGE_TAG}"
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
-NAMESPACE="team1"
+NAMESPACE="${NAMESPACE:-team1}"
 KAGENTI_API="$(kagenti_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
 
