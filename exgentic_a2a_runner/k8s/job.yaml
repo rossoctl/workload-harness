@@ -13,7 +13,9 @@ spec:
       # All cluster interaction goes through the Kagenti API and Keycloak over HTTP.
       containers:
         - name: runner
-          image: ghcr.io/exgentic/runner:latest
+          # Published by .github/workflows/build.yaml. `:latest` tracks
+          # main; use a `main-<sha7>` or `v*` tag to pin a specific build.
+          image: ghcr.io/kagenti/workload-harness/exgentic-a2a-runner:latest
           imagePullPolicy: IfNotPresent
           args:
             - "--benchmark"
