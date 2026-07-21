@@ -191,7 +191,7 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
-NAMESPACE="team1"
+NAMESPACE="${NAMESPACE:-team1}"
 
 # Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
 export CLUSTER_MODE INGRESS_DOMAIN
