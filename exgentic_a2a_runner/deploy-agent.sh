@@ -206,7 +206,7 @@ TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
 if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
     TOOL_NAME="${TOOL_NAME}-${EXPERIMENT_SUFFIX}"
 fi
-NAMESPACE="team1"
+NAMESPACE="${NAMESPACE:-team1}"
 
 # Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
 export CLUSTER_MODE INGRESS_DOMAIN

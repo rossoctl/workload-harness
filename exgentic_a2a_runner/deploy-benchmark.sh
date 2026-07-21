@@ -134,7 +134,7 @@ if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
     EXPERIMENT_SUFFIX="${EXPERIMENT_NAME//_/-}"
     TOOL_NAME="${TOOL_NAME}-${EXPERIMENT_SUFFIX}"
 fi
-NAMESPACE="team1"
+NAMESPACE="${NAMESPACE:-team1}"
 KAGENTI_API="$(kagenti_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
 

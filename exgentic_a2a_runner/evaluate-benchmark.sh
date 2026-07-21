@@ -181,9 +181,9 @@ AGENT_DEPLOYMENT="$AGENT_SERVICE"
 if [ "$USE_MCP_GATEWAY" = "true" ]; then
     MCP_BASE_URL="$(mcp_gateway_url)"
 else
-    MCP_BASE_URL="$(tool_http_url "$BENCHMARK_DEPLOYMENT" "team1")"
+    MCP_BASE_URL="$(tool_http_url "$BENCHMARK_DEPLOYMENT" "${NAMESPACE:-team1}")"
 fi
-AGENT_BASE_URL="$(agent_http_url "$AGENT_SERVICE" "team1")"
+AGENT_BASE_URL="$(agent_http_url "$AGENT_SERVICE" "${NAMESPACE:-team1}")"
 
 echo ""
 echo "Using service endpoints..."
@@ -396,7 +396,7 @@ export MAX_PARALLEL_SESSIONS="$MAX_PARALLEL_SESSIONS"
 export PROMETHEUS_URL="$(prometheus_url)"
 export INFRA_MCP_POD_PREFIX="$BENCHMARK_DEPLOYMENT"
 export INFRA_A2A_POD_PREFIX="$AGENT_DEPLOYMENT"
-export INFRA_NAMESPACE="team1"
+export INFRA_NAMESPACE="${NAMESPACE:-team1}"
 
 if [ "$MLFLOW_ENABLED" = "true" ]; then
     # Send OTEL traces to the collector, which forwards to MLflow's /v1/traces
