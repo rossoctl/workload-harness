@@ -993,8 +993,8 @@ To test a local image change without pushing to a registry, sync it into the kin
 
 ```bash
 cd exgentic_a2a_runner
-docker build -t ghcr.io/kagenti/workload-harness/exgentic-a2a-runner:dev .
-export REMOTE_IMAGE_NAME=ghcr.io/kagenti/workload-harness/exgentic-a2a-runner:dev
+docker build -t ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev .
+export REMOTE_IMAGE_NAME=ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev
 export KIND_CLUSTER_NAME=kagenti
 source ./sync-image-to-cluster.sh
 ```
@@ -1007,7 +1007,7 @@ The runner image is built and published by [`.github/workflows/build.yaml`](.git
 
 | Image | Source |
 |-------|--------|
-| `ghcr.io/kagenti/workload-harness/exgentic-a2a-runner` | [`exgentic_a2a_runner/Dockerfile`](exgentic_a2a_runner/Dockerfile) |
+| `ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner` | [`exgentic_a2a_runner/Dockerfile`](exgentic_a2a_runner/Dockerfile) |
 
 **Tags:**
 
@@ -1024,7 +1024,7 @@ The runner image is built and published by [`.github/workflows/build.yaml`](.git
 
 ```bash
 cd exgentic_a2a_runner
-docker build -t ghcr.io/kagenti/workload-harness/exgentic-a2a-runner:dev .
+docker build -t ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev .
 ```
 
 ## E2E Test Script
