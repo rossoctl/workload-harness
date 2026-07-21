@@ -43,6 +43,7 @@ class MCPClient:
         if self._tool_prefix:
             return f"{self._tool_prefix}{name}"
         return name
+
     def _get_event_loop(self) -> asyncio.AbstractEventLoop:
         """Get or create thread-local event loop."""
         if not hasattr(self._local, "loop"):
@@ -155,6 +156,7 @@ class MCPClient:
         logger.info(f"Initializing MCP client for {self.mcp_url}")
 
         try:
+
             async def _init():
                 session = await self._ensure_session()
                 tools_result = await session.list_tools()
@@ -284,8 +286,16 @@ class MCPClient:
             status = result.get("status", "")
             if status != "success":
                 error_msg = result.get("error", "")
-                if "client has been closed" in error_msg or "No session found" in error_msg:
-                    logger.debug(f"Session {session_id} already cleaned up: {error_msg}")
+                # Markers indicating the session/process is already gone. Deleting an
+                # already-dead session (e.g. the MCP sidecar was reaped after an agent
+                # timeout) is a clean no-op, not a failure — treat it as such.
+                benign_markers = (
+                    "client has been closed",
+                    "no session found",
+                    "no longer alive",
+                )
+                if any(marker in error_msg.lower() for marker in benign_markers):
+                    logger.warning(f"Session {session_id} already cleaned up: {error_msg}")
                     return
                 raise RuntimeError(f"Session deletion failed: {result}")
             logger.info(f"Session {session_id} deleted")

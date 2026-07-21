@@ -5,9 +5,17 @@ Reads configuration from environment variables:
     MLFLOW_URL          - MLflow base URL (e.g. http://localhost:8081)
     OAUTH_TOKEN         - Bearer token for auth
     EXPERIMENT_ID       - MLflow experiment ID (default: 0)
-    LIMIT               - Max traces to fetch (default: 100)
+    WINDOW_MS           - Only fetch traces newer than this many milliseconds
+                          ago (default: 10800000 = 3h). The listing is paged
+                          newest-first and stops at the first older trace.
     EXPERIMENT_FILTER   - Filter by experiment_name attribute
     COMPARE_EXPERIMENTS - Comma-separated experiment names to include
+    MLFLOW_WORKSPACE    - Workspace context; sent as x-mlflow-workspace header
+                          when set (required by RHOAI-managed MLflow)
+    MLFLOW_INSECURE_TLS - "true" to skip TLS cert verification (needed when
+                          reaching a reencrypt HTTPS endpoint via port-forward)
+    MIN_DURATION_S      - Skip traces shorter than this (seconds, default 0.1)
+                          at the listing stage; their spans are never fetched.
 
 Outputs JSON to stdout: {"traces": [{"traceId": ..., "spans": [...]}]}
 """
@@ -16,7 +24,9 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import sys
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -24,41 +34,94 @@ from datetime import datetime, timezone
 MLFLOW_URL = os.environ["MLFLOW_URL"]
 TOKEN = os.environ["OAUTH_TOKEN"]
 EXPERIMENT_ID = os.environ.get("EXPERIMENT_ID", "0")
-LIMIT = int(os.environ.get("LIMIT", "100"))
+# Time window: fetch traces from the last WINDOW_MS milliseconds (default 3h).
+WINDOW_MS = int(os.environ.get("WINDOW_MS", str(3 * 3600 * 1000)))
 EXPERIMENT_FILTER = os.environ.get("EXPERIMENT_FILTER", "")
 COMPARE_EXPERIMENTS = os.environ.get("COMPARE_EXPERIMENTS", "")
+MLFLOW_WORKSPACE = os.environ.get("MLFLOW_WORKSPACE", "")
+MLFLOW_INSECURE_TLS = os.environ.get("MLFLOW_INSECURE_TLS", "false").lower() == "true"
+# Skip trivially short traces (agent-card probes, health checks) that have no
+# real request. Filtered from the listing before spans are fetched. In seconds.
+MIN_DURATION_S = float(os.environ.get("MIN_DURATION_S", "0.1"))
+
+CUTOFF_MS = int(time.time() * 1000) - WINDOW_MS
+
+# When talking to a port-forwarded reencrypt HTTPS endpoint the cert won't
+# validate against localhost, so allow opting out of verification.
+_SSL_CONTEXT = ssl._create_unverified_context() if MLFLOW_INSECURE_TLS else None
 
 
 def mlflow_get(path: str) -> dict:
     url = f"{MLFLOW_URL}{path}"
-    req = urllib.request.Request(url, headers={
+    headers = {
         "Authorization": f"Bearer {TOKEN}",
         "Content-Type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    }
+    # RHOAI MLflow requires a workspace context on every request.
+    if MLFLOW_WORKSPACE:
+        headers["x-mlflow-workspace"] = MLFLOW_WORKSPACE
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30, context=_SSL_CONTEXT) as resp:
         return json.loads(resp.read())
 
 
-def fetch_trace_list() -> list[dict]:
-    """Fetch trace listing with pagination."""
-    all_traces: list[dict] = []
-    page_token = None
-    page_size = min(LIMIT, 500)
+def _is_long_enough(trace: dict) -> bool:
+    """True if the trace ran at least MIN_DURATION_S.
 
-    while len(all_traces) < LIMIT:
+    Filters out trivially short traces (agent-card probes / health checks with a
+    null request) at the listing stage, so their spans are never fetched. A
+    trace with no reported duration is kept — we can't prove it is short.
+    """
+    ms = trace.get("execution_time_ms")
+    if ms is None:
+        return True
+    return (ms / 1000.0) >= MIN_DURATION_S
+
+
+def fetch_trace_list() -> list[dict]:
+    """Fetch traces within the time window, dropping too-short traces.
+
+    The listing is paged newest-first (descending timestamp_ms), so we stop as
+    soon as we reach a trace older than CUTOFF_MS — older pages are never
+    requested. Traces shorter than MIN_DURATION_S are filtered here, before any
+    span download.
+    """
+    kept: list[dict] = []
+    skipped_short = 0
+    page_token = None
+    page_size = 500
+    reached_cutoff = False
+
+    while not reached_cutoff:
         url = f"/api/2.0/mlflow/traces?experiment_ids={EXPERIMENT_ID}&max_results={page_size}"
         if page_token:
             url += f"&page_token={page_token}"
 
         response = mlflow_get(url)
         traces = response.get("traces", [])
-        all_traces.extend(traces)
+        for t in traces:
+            ts = t.get("timestamp_ms")
+            # Newest-first ordering: once older than the window, we are done.
+            if ts is not None and ts < CUTOFF_MS:
+                reached_cutoff = True
+                break
+            if _is_long_enough(t):
+                kept.append(t)
+            else:
+                skipped_short += 1
 
         page_token = response.get("next_page_token")
         if not page_token or not traces:
             break
 
-    return all_traces[:LIMIT]
+    if skipped_short:
+        print(
+            f"Skipped {skipped_short} traces shorter than {MIN_DURATION_S}s "
+            f"(not fetched)",
+            file=sys.stderr,
+        )
+
+    return kept
 
 
 def transform_spans(raw_spans: list[dict]) -> list[dict]:
@@ -136,7 +199,12 @@ def transform_spans(raw_spans: list[dict]) -> list[dict]:
 
 
 def main() -> int:
-    print(f"Fetching traces from MLflow (experiment_id={EXPERIMENT_ID}, limit={LIMIT})...", file=sys.stderr)
+    window_h = WINDOW_MS / 3600000.0
+    print(
+        f"Fetching traces from MLflow (experiment_id={EXPERIMENT_ID}, "
+        f"window={window_h:g}h)...",
+        file=sys.stderr,
+    )
 
     all_traces = fetch_trace_list()
     real_traces = [t for t in all_traces if t.get("status") in ("OK", "ERROR")]

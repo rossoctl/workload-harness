@@ -272,6 +272,7 @@ if [ "$DRY_RUN" = "true" ]; then
     BENCHMARK_CMD_DISPLAY=$(printf '%q ' \
         "$SCRIPT_DIR/deploy-benchmark.sh" \
         --benchmark "$BENCHMARK_NAME" \
+        --experiment "$EXPERIMENT_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
@@ -282,6 +283,7 @@ if [ "$DRY_RUN" = "true" ]; then
     echo ""
 else
     "$SCRIPT_DIR/deploy-benchmark.sh" --benchmark "$BENCHMARK_NAME" \
+        --experiment "$EXPERIMENT_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
@@ -306,6 +308,7 @@ if [ "$DRY_RUN" = "true" ]; then
         "$SCRIPT_DIR/deploy-agent.sh" \
         --benchmark "$BENCHMARK_NAME" \
         --agent "$AGENT_NAME" \
+        --experiment "$EXPERIMENT_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \
@@ -319,6 +322,7 @@ if [ "$DRY_RUN" = "true" ]; then
     echo ""
 else
     "$SCRIPT_DIR/deploy-agent.sh" --benchmark "$BENCHMARK_NAME" --agent "$AGENT_NAME" \
+        --experiment "$EXPERIMENT_NAME" \
         --model "$MODEL_NAME" \
         --keycloak-user "$KEYCLOAK_USERNAME" \
         --keycloak-pass "$KEYCLOAK_PASSWORD" \

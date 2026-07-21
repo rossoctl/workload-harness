@@ -12,6 +12,7 @@ MODEL_NAME="Azure/gpt-4.1"
 KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
 BENCHMARK_NAME=""
+EXPERIMENT_NAME="default"
 USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
 CLUSTER_MODE=""
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --benchmark)
             BENCHMARK_NAME="$2"
+            shift 2
+            ;;
+        --experiment)
+            EXPERIMENT_NAME="$2"
             shift 2
             ;;
         --model)
@@ -68,6 +73,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --benchmark NAME           Benchmark name (e.g., gsm8k, tau2)"
             echo ""
             echo "Optional Arguments:"
+            echo "  --experiment NAME          Experiment name suffix appended to pod names (default: default)"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --action-timeout SECONDS   Per-action step timeout in seconds (default: 30)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
@@ -123,6 +129,11 @@ EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/exgentic-mcp-${BENCHMARK_NAME}:${IMAGE_TAG}"
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
+# Append experiment suffix when non-default so parallel experiments get distinct pod names
+if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
+    EXPERIMENT_SUFFIX="${EXPERIMENT_NAME//_/-}"
+    TOOL_NAME="${TOOL_NAME}-${EXPERIMENT_SUFFIX}"
+fi
 NAMESPACE="${NAMESPACE:-team1}"
 KAGENTI_API="$(kagenti_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
@@ -515,10 +526,29 @@ fi
 
 echo ""
 
-# Step 11: Wait for MCP server to be ready.
+# Step 11: Set resource limits (local/dev only — kubectl not available in-cluster).
+if [ "$CLUSTER_MODE" = "in-cluster" ]; then
+    echo "Step 11: Setting resource limits... (skipped — kubectl not available in-cluster)"
+else
+    echo "Step 11.1: Setting resource limits..."
+    kubectl set resources deployment/$TOOL_NAME -n $NAMESPACE \
+        --limits=cpu=4,memory=4Gi \
+        --requests=cpu=500m,memory=512Mi 2>/dev/null \
+        && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 4Gi)" \
+        || echo "Warning: Could not set resource limits"
+    echo ""
+
+    echo "Step 11.2: Waiting for deployment to stabilize..."
+    kubectl rollout status deployment/$TOOL_NAME -n $NAMESPACE --timeout=360s
+    echo "✓ Deployment stable"
+fi
+
+echo ""
+
+# Step 12: Wait for MCP server to be ready after the rollout triggered by set resources.
 # Uses an HTTP health check against the cluster-internal service URL — kubectl is
 # not available inside the job container.
-echo "Step 11: Waiting for MCP server to be ready..."
+echo "Step 12: Waiting for MCP server to be ready..."
 
 MCP_URL="$(tool_http_url "$TOOL_NAME" "$NAMESPACE")"
 echo "  MCP URL: $MCP_URL"
@@ -559,23 +589,6 @@ if [ "$MCP_READY" = false ]; then
 fi
 
 echo ""
-
-# Step 12: Set resource limits (local/dev only — kubectl not available in-cluster).
-if [ "$CLUSTER_MODE" = "in-cluster" ]; then
-    echo "Step 12: Setting resource limits... (skipped — kubectl not available in-cluster)"
-else
-    echo "Step 12.1: Setting resource limits..."
-    kubectl set resources deployment/$TOOL_NAME -n $NAMESPACE \
-        --limits=cpu=4,memory=4Gi \
-        --requests=cpu=500m,memory=512Mi 2>/dev/null \
-        && echo "✓ Benchmark resource limits set (CPU: 4 cores, Memory: 4Gi)" \
-        || echo "Warning: Could not set resource limits"
-    echo ""
-
-    echo "Step 12.2: Waiting for deployment to stabilize..."
-    kubectl rollout status deployment/$TOOL_NAME -n $NAMESPACE --timeout=120s
-    echo "✓ Deployment stable"
-fi
 
 # Step 14: Register with MCP Gateway (conditional)
 if [ "$USE_MCP_GATEWAY" = "true" ]; then

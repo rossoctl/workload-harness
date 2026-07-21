@@ -137,7 +137,16 @@ export AGENT_SERVICE="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
 AGENT_SERVICE="${AGENT_SERVICE//_/-}"
 
 # Set benchmark service name (override .env values)
-export BENCHMARK_SERVICE="exgentic-mcp-${BENCHMARK_NAME}-mcp"
+BENCHMARK_BASE="exgentic-mcp-${BENCHMARK_NAME}"
+
+# Append experiment suffix when non-default so service names match the deployed pods
+if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
+    EXPERIMENT_SUFFIX="${EXPERIMENT_NAME//_/-}"
+    AGENT_SERVICE="${AGENT_SERVICE}-${EXPERIMENT_SUFFIX}"
+    BENCHMARK_BASE="${BENCHMARK_BASE}-${EXPERIMENT_SUFFIX}"
+fi
+
+export BENCHMARK_SERVICE="${BENCHMARK_BASE}-mcp"
 
 # MCP Gateway configuration
 USE_MCP_GATEWAY="${USE_MCP_GATEWAY:-false}"

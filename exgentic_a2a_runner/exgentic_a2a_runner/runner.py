@@ -331,9 +331,15 @@ class Runner:
                     except Exception as e:
                         logger.warning("Failed to collect infra metrics: %s", e)
 
-                # Delete session
+                # Delete session. Cleanup must not flip a completed session to
+                # ERROR: catch inside the child span so a residual cleanup error
+                # (e.g. sidecar already reaped after a timeout) never exits the
+                # span context nor propagates to the outer failure handler.
                 with self.otel.child_span("MCP.DeleteSession"):
-                    self.exgentic.delete_session(session_id)
+                    try:
+                        self.exgentic.delete_session(session_id)
+                    except Exception as delete_error:
+                        logger.warning(f"Failed to delete session {session_id}: {delete_error}")
 
                 # Record success
                 self.otel.record_success(span, evaluation_result)
@@ -365,13 +371,16 @@ class Runner:
 
                 logger.error(f"Session {session_id} failed: {error_type}: {error_msg}")
 
-                # Try to delete session even on failure (only if session was created)
+                # Try to delete session even on failure (only if session was created).
+                # Catch inside the child span so a cleanup failure never marks the
+                # MCP.DeleteSession span ERROR — the session's real failure is already
+                # recorded on the parent Agent.Session span below.
                 if session_id and not session_id.startswith("pending-"):
-                    try:
-                        with self.otel.child_span("MCP.DeleteSession"):
+                    with self.otel.child_span("MCP.DeleteSession"):
+                        try:
                             self.exgentic.delete_session(session_id)
-                    except Exception as delete_error:
-                        logger.warning(f"Failed to delete session {session_id}: {delete_error}")
+                        except Exception as delete_error:
+                            logger.warning(f"Failed to delete session {session_id}: {delete_error}")
 
                 # Record failure
                 self.otel.record_failure(span, e, error_type)

@@ -39,6 +39,7 @@ KEYCLOAK_USERNAME="admin"
 KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-unknown}"
 BENCHMARK_NAME=""
 AGENT_NAME_INPUT=""
+EXPERIMENT_NAME="default"
 USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
 CLUSTER_MODE=""
@@ -60,6 +61,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --agent)
             AGENT_NAME_INPUT="$2"
+            shift 2
+            ;;
+        --experiment)
+            EXPERIMENT_NAME="$2"
             shift 2
             ;;
         --model)
@@ -119,6 +124,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --agent NAME               Agent name (e.g., tool_calling)"
             echo ""
             echo "Optional Arguments:"
+            echo "  --experiment NAME          Experiment name suffix appended to pod names (default: default)"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
@@ -184,6 +190,11 @@ fi
 # Replace underscores with hyphens for Kubernetes compatibility
 AGENT_NAME="${FULL_AGENT_NAME}-${BENCHMARK_NAME}"
 AGENT_NAME="${AGENT_NAME//_/-}"
+# Append experiment suffix when non-default so parallel experiments get distinct pod names
+if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
+    EXPERIMENT_SUFFIX="${EXPERIMENT_NAME//_/-}"
+    AGENT_NAME="${AGENT_NAME}-${EXPERIMENT_SUFFIX}"
+fi
 
 # Default to Exgentic registry, can be overridden with environment variable
 EXGENTIC_REGISTRY="${EXGENTIC_REGISTRY:-ghcr.io/exgentic}"
@@ -191,6 +202,10 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 REMOTE_IMAGE_NAME="${EXGENTIC_REGISTRY}/${FULL_AGENT_NAME}:${IMAGE_TAG}"
 
 TOOL_NAME="exgentic-mcp-${BENCHMARK_NAME}"
+# Match the experiment suffix applied to the benchmark so MCP_URL points to the right service
+if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
+    TOOL_NAME="${TOOL_NAME}-${EXPERIMENT_SUFFIX}"
+fi
 NAMESPACE="${NAMESPACE:-team1}"
 
 # Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
@@ -699,10 +714,44 @@ if [ "$CLUSTER_MODE" = "openshift" ]; then
         || echo "Warning: Could not patch route targetPort (route may not exist yet)"
 fi
 
-# Step 10: Wait for agent to be ready.
+# Step 10: Update openai-secret
+echo "=========================================="
+echo "Final Configuration"
+echo "=========================================="
+echo ""
+
+# Step 10.1: Update secrets
+if [ "$CLUSTER_MODE" = "kind" ]; then
+    echo "Step 10.1: Updating secrets..."
+    "$SCRIPT_DIR/update-secrets.sh" --namespace "$NAMESPACE"
+else
+    echo "Step 10.1: Updating secrets... (skipped — secrets are pre-provisioned on OpenShift/in-cluster)"
+fi
+
+echo ""
+
+# Step 10.2/10.3: Set resource limits and wait for rollout (local/dev only).
+if [ "$CLUSTER_MODE" = "in-cluster" ]; then
+    echo "Step 10.2: Setting resource limits... (skipped — kubectl not available in-cluster)"
+else
+    echo "Step 10.2: Setting resource limits..."
+    kubectl set resources deployment/$AGENT_NAME -n $NAMESPACE \
+        --limits=cpu=4,memory=2Gi \
+        --requests=cpu=500m,memory=512Mi 2>/dev/null \
+        && echo "✓ Agent resource limits set (CPU: 4 cores, Memory: 2Gi)" \
+        || echo "Warning: Could not set resource limits"
+    echo ""
+
+    echo "Step 10.3: Waiting for deployment to stabilize..."
+    kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
+    echo "✓ Deployment stable"
+fi
+echo ""
+
+# Step 11: Wait for agent to be ready after the rollout triggered by set resources.
 # Uses an HTTP health check (agent card endpoint) — kubectl is not available
 # inside the job container.
-echo "Step 10: Waiting for agent to be ready..."
+echo "Step 11: Waiting for agent to be ready..."
 
 AGENT_URL="$(agent_http_url "$AGENT_NAME" "$NAMESPACE")"
 echo "  Agent URL: $AGENT_URL"
@@ -740,40 +789,6 @@ fi
 
 echo ""
 
-# Step 11: Update openai-secret
-echo "=========================================="
-echo "Final Configuration"
-echo "=========================================="
-echo ""
-
-# Step 11.1: Update secrets
-if [ "$CLUSTER_MODE" = "kind" ]; then
-    echo "Step 11.1: Updating secrets..."
-    "$SCRIPT_DIR/update-secrets.sh" --namespace "$NAMESPACE"
-else
-    echo "Step 11.1: Updating secrets... (skipped — secrets are pre-provisioned on OpenShift/in-cluster)"
-fi
-
-echo ""
-
-# Step 11.2/11.3: Set resource limits and wait for rollout (local/dev only).
-if [ "$CLUSTER_MODE" = "in-cluster" ]; then
-    echo "Step 11.2: Setting resource limits... (skipped — kubectl not available in-cluster)"
-else
-    echo "Step 11.2: Setting resource limits..."
-    kubectl set resources deployment/$AGENT_NAME -n $NAMESPACE \
-        --limits=cpu=4,memory=2Gi \
-        --requests=cpu=500m,memory=512Mi 2>/dev/null \
-        && echo "✓ Agent resource limits set (CPU: 4 cores, Memory: 2Gi)" \
-        || echo "Warning: Could not set resource limits"
-    echo ""
-
-    echo "Step 11.3: Waiting for deployment to stabilize..."
-    kubectl rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=120s
-    echo "✓ Deployment stable"
-fi
-echo ""
-
 # Step 11.4: Apply the AuthBridge plugin pipeline overlay (if any
 # plugin selector was supplied). The operator base config enables every
 # supported plugin; this overlay sets on_error: off on the ones we
@@ -801,7 +816,7 @@ if [ "$AUTHBRIDGE_ENABLED" = "true" ]; then
     echo ""
 fi
 
-# Step 12: Agent card already verified in Step 10; just show it.
+# Step 12: Agent card already verified in Step 11; just show it.
 echo "Step 12: Agent card:"
 AGENT_HTTP_ROUTE_URL="$(agent_http_url "$AGENT_NAME" "$NAMESPACE")"
 CARD_RESPONSE=$(curl -s --max-time 5 "${AGENT_HTTP_ROUTE_URL}/.well-known/agent-card.json" 2>/dev/null || echo "")

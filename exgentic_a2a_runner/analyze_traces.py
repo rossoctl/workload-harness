@@ -589,137 +589,101 @@ def print_experiment_comparison(records: list[TraceRecord]) -> None:
     if not records:
         print("No traces to compare.")
         return
-    
-    # Get unique experiments
+
     experiments = sorted(set(r.experiment_name for r in records))
-    
+
     if len(experiments) < 2:
         print(f"Only one experiment found: {experiments[0] if experiments else 'none'}")
         print("Need at least 2 experiments to compare.")
         return
-    
+
+    exp_groups: dict[str, list[TraceRecord]] = defaultdict(list)
+    for r in records:
+        exp_groups[r.experiment_name].append(r)
+
+    has_infra = any(t.has_infra for traces in exp_groups.values() for t in traces)
+
+    col_w = max(20, max(len(e) for e in experiments) + 2)
+
     print()
     print("=" * 140)
     print(f"Experiment Comparison: {' vs '.join(experiments)}")
     print("=" * 140)
     print()
-    
-    # Group by (agent, benchmark, model) and then by experiment
-    config_groups: dict[tuple, dict[str, list[TraceRecord]]] = defaultdict(lambda: defaultdict(list))
-    
-    for r in records:
-        config_key = (r.agent_name, r.benchmark_name, r.model, r.num_parallel)
-        config_groups[config_key][r.experiment_name].append(r)
-    
-    # Print a table for each configuration
-    for config_key in sorted(config_groups.keys()):
-        agent, benchmark, model, num_parallel = config_key
-        exp_groups = config_groups[config_key]
-        
-        # Only show configs that have data for multiple experiments
-        if len(exp_groups) < 2:
-            continue
-        
-        print(f"\nAgent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}  |  Parallel: {num_parallel}")
-        print("-" * 140)
-        
-        # Check if any traces have infra data
-        has_infra = any(t.has_infra for traces in exp_groups.values() for t in traces)
-        
-        # Build header
-        header = f"{'Metric':<35s}"
-        for exp in experiments:
-            if exp in exp_groups:
-                header += f" | {exp:>12s}"
-        print(header)
-        print("-" * len(header))
-        
-        # Helper to print a metric row
-        def print_metric_row(label: str, metric_fn, fmt: str = ".2f") -> None:
-            row = f"{label:<35s}"
-            for exp in experiments:
-                if exp in exp_groups:
-                    traces = exp_groups[exp]
-                    values = [metric_fn(t) for t in traces]
-                    avg_val = avg(values)
-                    row += f" | {avg_val:>12{fmt}}"
-                else:
-                    row += f" | {'N/A':>12s}"
-            print(row)
-        
-        # Count row
-        count_row = f"{'Traces (count)':<35s}"
-        for exp in experiments:
-            if exp in exp_groups:
-                count_row += f" | {len(exp_groups[exp]):>12d}"
-            else:
-                count_row += f" | {'N/A':>12s}"
-        print(count_row)
-        
-        # Evaluation success rate
-        eval_row = f"{'Eval Success Rate (%)':<35s}"
-        for exp in experiments:
-            if exp in exp_groups:
-                traces = exp_groups[exp]
-                eval_success = sum(1 for t in traces if t.evaluation_result is True)
-                rate = (eval_success / len(traces) * 100) if traces else 0
-                eval_row += f" | {rate:>12.1f}"
-            else:
-                eval_row += f" | {'N/A':>12s}"
-        print(eval_row)
 
-        # --- Timing (absolute) ---
-        print_metric_row("Total Latency (s)", lambda t: t.total_latency_s)
-        print_metric_row("Session Creation (s)", lambda t: t.session_creation_s)
-        print_metric_row("Agent Call (s)", lambda t: t.agent_call_s)
-        print_metric_row("  Time to First Obs (s)", lambda t: t.time_to_first_obs_s)
-        print_metric_row("  LLM Calls (s)", lambda t: t.llm_after_obs_s)
-        print_metric_row("  Tool Calls (s)", lambda t: t.tool_total_s)
-        print_metric_row("  Overhead (s)", lambda t: t.overhead_s)
-        print_metric_row("Evaluation (s)", lambda t: t.evaluation_s)
+    header = f"{'Metric':<35s}"
+    for exp in experiments:
+        header += f" | {exp:>{col_w}s}"
+    print(header)
+    print("-" * len(header))
 
-        # --- Timing (% of agent call) ---
-        sep = f"{'':35s}"
+    def print_metric_row(label: str, metric_fn, fmt: str = ".2f") -> None:
+        row = f"{label:<35s}"
         for exp in experiments:
-            if exp in exp_groups:
-                sep += f" | {'':>12s}"
+            traces = exp_groups[exp]
+            values = [metric_fn(t) for t in traces]
+            row += f" | {avg(values):>{col_w}{fmt}}"
+        print(row)
+
+    count_row = f"{'Traces (count)':<35s}"
+    for exp in experiments:
+        count_row += f" | {len(exp_groups[exp]):>{col_w}d}"
+    print(count_row)
+
+    eval_row = f"{'Eval Success Rate (%)':<35s}"
+    for exp in experiments:
+        traces = exp_groups[exp]
+        n = len(traces)
+        rate = sum(1 for t in traces if t.evaluation_result is True) / n * 100 if n else 0
+        eval_row += f" | {rate:>{col_w}.1f}"
+    print(eval_row)
+
+    print_metric_row("Total Latency (s)", lambda t: t.total_latency_s)
+    print_metric_row("Session Creation (s)", lambda t: t.session_creation_s)
+    print_metric_row("Agent Call (s)", lambda t: t.agent_call_s)
+    print_metric_row("  Time to First Obs (s)", lambda t: t.time_to_first_obs_s)
+    print_metric_row("  LLM Calls (s)", lambda t: t.llm_after_obs_s)
+    print_metric_row("  Tool Calls (s)", lambda t: t.tool_total_s)
+    print_metric_row("  Overhead (s)", lambda t: t.overhead_s)
+    print_metric_row("Evaluation (s)", lambda t: t.evaluation_s)
+
+    sep = f"{'':35s}" + (f" | {'':>{col_w}s}" * len(experiments))
+    print(sep)
+    print_metric_row("% Time before 1st Obs",
+                     lambda t: (t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+    print_metric_row("% Time on LLM calls",
+                     lambda t: (t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+    print_metric_row("% Time on Tool calls",
+                     lambda t: (t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+    print_metric_row("% Time overhead",
+                     lambda t: (t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+
+    print(sep)
+    print_metric_row("LLM Calls (count)", lambda t: t.llm_count_after_obs, ".1f")
+    print_metric_row("Avg LLM Call Latency (s)",
+                     lambda t: (t.llm_after_obs_s / t.llm_count_after_obs) if t.llm_count_after_obs > 0 else 0, ".3f")
+    print_metric_row("Tool Calls (count)", lambda t: t.tool_count, ".1f")
+    print_metric_row("Avg Tool Call Latency (s)",
+                     lambda t: (t.tool_total_s / t.tool_count) if t.tool_count > 0 else 0, ".3f")
+    print_metric_row("LLM Input Tokens", lambda t: t.llm_input_tokens, ".0f")
+    print_metric_row("LLM Output Tokens", lambda t: t.llm_output_tokens, ".0f")
+    print_metric_row("LLM Total Tokens", lambda t: t.llm_input_tokens + t.llm_output_tokens, ".0f")
+
+    if has_infra:
         print(sep)
-        print_metric_row("% Time before 1st Obs",
-                         lambda t: (t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time on LLM calls",
-                         lambda t: (t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time on Tool calls",
-                         lambda t: (t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time overhead",
-                         lambda t: (t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+        print_metric_row("MCP CPU Utilization (%)", lambda t: t.mcp_cpu_utilization_pct if t.has_infra else 0, ".1f")
+        print_metric_row("MCP CPU Throttle (%)", lambda t: t.mcp_throttle_pct if t.has_infra else 0, ".1f")
+        print_metric_row("MCP Memory Max (MB)", lambda t: t.mcp_memory_max_mb if t.has_infra else 0, ".0f")
+        print_metric_row("MCP Memory Utilization (%)", lambda t: t.mcp_memory_utilization_pct if t.has_infra else 0, ".1f")
+        print_metric_row("MCP Network RX (MB)", lambda t: t.mcp_network_rx_mb if t.has_infra else 0, ".3f")
+        print_metric_row("MCP Network TX (MB)", lambda t: t.mcp_network_tx_mb if t.has_infra else 0, ".3f")
+        print_metric_row("A2A CPU Utilization (%)", lambda t: t.a2a_cpu_utilization_pct if t.has_infra else 0, ".1f")
+        print_metric_row("A2A CPU Throttle (%)", lambda t: t.a2a_throttle_pct if t.has_infra else 0, ".1f")
+        print_metric_row("A2A Memory Max (MB)", lambda t: t.a2a_memory_max_mb if t.has_infra else 0, ".0f")
+        print_metric_row("A2A Memory Utilization (%)", lambda t: t.a2a_memory_utilization_pct if t.has_infra else 0, ".1f")
+        print_metric_row("A2A Network RX (MB)", lambda t: t.a2a_network_rx_mb if t.has_infra else 0, ".3f")
+        print_metric_row("A2A Network TX (MB)", lambda t: t.a2a_network_tx_mb if t.has_infra else 0, ".3f")
 
-        # --- Agent metrics ---
-        print(sep)
-        print_metric_row("LLM Calls (count)", lambda t: t.llm_count_after_obs, ".1f")
-        print_metric_row("Avg LLM Call Latency (s)", lambda t: (t.llm_after_obs_s / max(t.llm_count_after_obs, 1)) if t.llm_count_after_obs > 0 else 0, ".3f")
-        print_metric_row("Tool Calls (count)", lambda t: t.tool_count, ".1f")
-        print_metric_row("Avg Tool Call Latency (s)", lambda t: (t.tool_total_s / max(t.tool_count, 1)) if t.tool_count > 0 else 0, ".3f")
-        print_metric_row("LLM Input Tokens", lambda t: t.llm_input_tokens, ".0f")
-        print_metric_row("LLM Output Tokens", lambda t: t.llm_output_tokens, ".0f")
-        print_metric_row("LLM Total Tokens", lambda t: t.llm_input_tokens + t.llm_output_tokens, ".0f")
-        
-        # --- Infrastructure metrics (if available) ---
-        if has_infra:
-            print(sep)
-            print_metric_row("MCP CPU Utilization (%)", lambda t: t.mcp_cpu_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP CPU Throttle (%)", lambda t: t.mcp_throttle_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP Memory Max (MB)", lambda t: t.mcp_memory_max_mb if t.has_infra else 0, ".0f")
-            print_metric_row("MCP Memory Utilization (%)", lambda t: t.mcp_memory_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP Network RX (MB)", lambda t: t.mcp_network_rx_mb if t.has_infra else 0, ".3f")
-            print_metric_row("MCP Network TX (MB)", lambda t: t.mcp_network_tx_mb if t.has_infra else 0, ".3f")
-            
-            print_metric_row("A2A CPU Utilization (%)", lambda t: t.a2a_cpu_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A CPU Throttle (%)", lambda t: t.a2a_throttle_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A Memory Max (MB)", lambda t: t.a2a_memory_max_mb if t.has_infra else 0, ".0f")
-            print_metric_row("A2A Memory Utilization (%)", lambda t: t.a2a_memory_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A Network RX (MB)", lambda t: t.a2a_network_rx_mb if t.has_infra else 0, ".3f")
-            print_metric_row("A2A Network TX (MB)", lambda t: t.a2a_network_tx_mb if t.has_infra else 0, ".3f")
-    
     print()
 
 
@@ -738,7 +702,7 @@ def main() -> int:
         raw = json.load(sys.stdin)
 
     records = parse_traces(raw)
-    
+
     if args.compare:
         print_experiment_comparison(records)
     else:
