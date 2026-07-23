@@ -906,15 +906,11 @@ The runner can execute entirely inside the cluster as a Kubernetes Job — no lo
 
 `k8s/job.yaml` is the launch template. It references secrets for credentials and passes benchmark/agent flags as container `args`. The job container uses cluster-internal DNS to reach the Kagenti API, Keycloak, MCP server, and agent — no port-forwarding is required. MLflow tracing switches automatically to HTTP/protobuf when `KUBERNETES_SERVICE_HOST` is set.
 
-### Step 1 — Build and push the runner image
+### Step 1 — Pull (or build) the runner image
 
-```bash
-cd exgentic_a2a_runner
-docker build -t ghcr.io/exgentic/runner:latest .
-docker push ghcr.io/exgentic/runner:latest
-```
+Prebuilt multi-arch images are published to GHCR on every push to `main` and every `v*` tag — see [Container images](#container-images) below. `k8s/job.yaml` points at `:latest` (which tracks `main`) by default, so no build is required.
 
-Replace `ghcr.io/exgentic/runner:latest` with your own registry path if needed, and update `k8s/job.yaml` → `image:` to match.
+To build locally instead — for example, to test unreleased changes — see [Iterating with a locally-built image](#iterating-with-a-locally-built-image).
 
 ### Step 2 — Set up required secrets
 
@@ -996,12 +992,40 @@ AGENT PROCESSING LATENCY
 To test a local image change without pushing to a registry, sync it into the kind cluster first:
 
 ```bash
-export REMOTE_IMAGE_NAME=ghcr.io/exgentic/runner:dev
+cd exgentic_a2a_runner
+docker build -t ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev .
+export REMOTE_IMAGE_NAME=ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev
 export KIND_CLUSTER_NAME=kagenti
 source ./sync-image-to-cluster.sh
 ```
 
-Then set `imagePullPolicy: IfNotPresent` in `k8s/job.yaml` and submit as above.
+Update `k8s/job.yaml` → `image:` to match your local tag, set `imagePullPolicy: IfNotPresent`, and submit as above.
+
+## Container images
+
+The runner image is built and published by [`.github/workflows/build.yaml`](.github/workflows/build.yaml) on every push to `main`, every `v*` tag, and manual workflow dispatch. Images are multi-arch (`linux/amd64`, `linux/arm64`).
+
+| Image | Source |
+|-------|--------|
+| `ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner` | [`exgentic_a2a_runner/Dockerfile`](exgentic_a2a_runner/Dockerfile) |
+
+**Tags:**
+
+| Ref pushed | Tags produced |
+|------------|---------------|
+| `v*` tag (e.g. `v0.0.1`) | `v0.0.1`, `latest` |
+| Push to `main` | `main-<sha7>`, `latest` |
+| Manual dispatch on any branch | `<branch>-<sha7>`, `latest` |
+| Push to any other branch | `<branch>-<sha7>` |
+
+`latest` tracks `main` — pin to a `v*` or `main-<sha7>` tag for reproducible deploys.
+
+**Build locally:**
+
+```bash
+cd exgentic_a2a_runner
+docker build -t ghcr.io/rossoctl/workload-harness/exgentic-a2a-runner:dev .
+```
 
 ## E2E Test Script
 
