@@ -4,7 +4,7 @@
 # This fragment is intentionally minimal so the overlay can keep the
 # plugin in the resolved selection without re-rendering the operator
 # config. Per-route exchange rules live in the `authproxy-routes`
-# ConfigMap (see kagenti-extensions/authbridge/CLAUDE.md). Per-plugin
+# ConfigMap (see rossoctl-extensions/authbridge/CLAUDE.md). Per-plugin
 # overrides may be supplied via --plugin-config-file.
 #
 # Mutually exclusive with token-broker (both claim

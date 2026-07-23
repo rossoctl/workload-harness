@@ -87,7 +87,7 @@ fi
 # --- Pre-flight: ConfigMap exists.
 if ! kubectl -n "$NAMESPACE" get configmap "$CM_NAME" >/dev/null 2>&1; then
     echo "ERROR: ConfigMap $NAMESPACE/$CM_NAME not found." >&2
-    echo "       The kagenti operator should create this when the agent pod is admitted." >&2
+    echo "       The rossoctl operator should create this when the agent pod is admitted." >&2
     echo "       Check: kubectl -n $NAMESPACE get pods -l app.kubernetes.io/name=$AGENT_NAME" >&2
     exit 1
 fi

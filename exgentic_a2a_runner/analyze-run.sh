@@ -61,14 +61,14 @@ Options:
     --mlflow-port PORT         Remote MLflow service port to forward
     --mlflow-tls               MLflow serves HTTPS on the forwarded port
     --mlflow-workspace NAME    Send x-mlflow-workspace header
-    --auth-mode MODE           Token source: secret (kagenti oauth secret) or oc-token (oc whoami -t)
+    --auth-mode MODE           Token source: secret (rossoctl oauth secret) or oc-token (oc whoami -t)
     -h, --help                 Show this help message
 
 The MLflow location, TLS, workspace, auth mode, and experiment id all DEFAULT
 from the cluster mode, so a plain --kind or --openshift needs no other flags:
 
                      --kind                    --openshift
-    namespace        kagenti-system            redhat-ods-applications
+    namespace        rossoctl-system            redhat-ods-applications
     service          mlflow                    mlflow
     remote port      5000                      8443
     tls              off (http)                on (https)
@@ -131,9 +131,9 @@ fi
 # already set the value wins; only unset values fall back to the mode default.
 case "$CLUSTER_MODE" in
     kind)
-        # kagenti's kind MLflow: HTTP on port 5000 in kagenti-system, no
+        # rossoctl's kind MLflow: HTTP on port 5000 in rossoctl-system, no
         # workspace header, client-credentials secret flow for auth.
-        MLFLOW_NAMESPACE="${MLFLOW_NAMESPACE:-kagenti-system}"
+        MLFLOW_NAMESPACE="${MLFLOW_NAMESPACE:-rossoctl-system}"
         MLFLOW_SERVICE="${MLFLOW_SERVICE:-mlflow}"
         MLFLOW_REMOTE_PORT="${MLFLOW_REMOTE_PORT:-5000}"
         MLFLOW_TLS="${MLFLOW_TLS:-false}"
@@ -277,7 +277,7 @@ cleanup_port_forward() {
     fi
 }
 
-# secret mode: kagenti's client-credentials flow. Reads mlflow-oauth-secret and
+# secret mode: rossoctl's client-credentials flow. Reads mlflow-oauth-secret and
 # execs into the MLflow pod to exchange it for an access token.
 get_token_from_secret() {
     echo "Obtaining OAuth token via mlflow-oauth-secret..."

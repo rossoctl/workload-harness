@@ -6,8 +6,8 @@ scripts and the Python harness they ultimately launch:
 | Script | Role |
 |---|---|
 | `deploy-and-evaluate.sh` | Top-level orchestrator — runs the three steps below in sequence |
-| `deploy-benchmark.sh` | Deploys the benchmark as an **MCP tool** (the session/eval backend) via the Kagenti API |
-| `deploy-agent.sh` | Deploys the **A2A agent**  via the Kagenti API, optionally with an AuthBridge sidecar  |
+| `deploy-benchmark.sh` | Deploys the benchmark as an **MCP tool** (the session/eval backend) via the Rossoctl API |
+| `deploy-agent.sh` | Deploys the **A2A agent**  via the Rossoctl API, optionally with an AuthBridge sidecar  |
 | `evaluate-benchmark.sh` | Wires up endpoints + telemetry, then runs the Python harness `exgentic-a2a-runner` |
 | `exgentic_a2a_runner/*.py` | The harness itself — drives MCP sessions + A2A calls per task, emits OTEL traces |
 
@@ -81,7 +81,7 @@ flowchart TD
     ORCH -->|Step 2| A[deploy-agent.sh]
     ORCH -->|Step 3| E[evaluate-benchmark.sh]
 
-    B -.->|MCP tool live| K[(Kagenti cluster)]
+    B -.->|MCP tool live| K[(Rossoctl cluster)]
     A -.->|A2A agent live| K
     E -->|runs harness| H[exgentic-a2a-runner]
     H -.->|MCP + A2A traffic| K
@@ -93,8 +93,8 @@ flowchart TD
 
 Authenticates to Keycloak (auto-fetching / enabling Direct Access Grants),
 deletes any existing tool (waiting for async cleanup), fetches + parses the
-benchmark `.env` through the Kagenti `parse-env` API, augments it with runtime
-vars, then `POST`s a tool spec to the Kagenti API. Polls the MCP `initialize`
+benchmark `.env` through the Rossoctl `parse-env` API, augments it with runtime
+vars, then `POST`s a tool spec to the Rossoctl API. Polls the MCP `initialize`
 endpoint until ready. Optionally registers the tool with the MCP Gateway.
 
 ### 2.1 Interaction diagram
@@ -104,7 +104,7 @@ sequenceDiagram
     autonumber
     participant Bench as deploy-benchmark.sh
     participant KC as Keycloak
-    participant KAG as Kagenti API
+    participant KAG as Rossoctl API
     participant GH as GitHub (raw .env)
     participant K8s as kubectl / cluster
     participant MCP as MCP tool pod
@@ -112,13 +112,13 @@ sequenceDiagram
     note over Bench: source libsh/urls.sh → resolve URLs from CLUSTER_MODE
     Bench->>KC: GET /health (retry ≤10s)
     opt password == "unknown" (kind)
-        Bench->>K8s: get secret kagenti-test-user
+        Bench->>K8s: get secret rossoctl-test-user
         K8s-->>Bench: benchmark password
     end
     Bench->>KC: POST realms/master token (admin-cli)
     KC-->>Bench: admin token
-    Bench->>KC: PUT clients/kagenti {directAccessGrantsEnabled:true}
-    Bench->>KC: POST realms/kagenti token (password grant)
+    Bench->>KC: PUT clients/rossoctl {directAccessGrantsEnabled:true}
+    Bench->>KC: POST realms/rossoctl token (password grant)
     KC-->>Bench: ACCESS_TOKEN
     Bench->>KAG: GET /api/v1/namespaces (reachability, retry ≤10s)
 
@@ -161,7 +161,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     B[deploy-benchmark.sh] -->|auth| KC[(Keycloak)]
-    B -->|deploy/delete tool<br/>parse-env| KAG[(Kagenti API)]
+    B -->|deploy/delete tool<br/>parse-env| KAG[(Rossoctl API)]
     B -->|fetch .env.benchmark| GH[(GitHub raw)]
     B -->|patch / resources / gateway CRs| KUBE[(kubectl → cluster)]
     KAG -->|creates Deployment + Service + HTTPRoute| MCP["exgentic-mcp-&lt;bench&gt; pod<br/>team1 ns"]
@@ -187,7 +187,7 @@ sequenceDiagram
     autonumber
     participant Agent as deploy-agent.sh
     participant KC as Keycloak
-    participant KAG as Kagenti API
+    participant KAG as Rossoctl API
     participant GH as GitHub (raw .env)
     participant PY as authbridge resolver (python3)
     participant K8s as kubectl / cluster
@@ -250,7 +250,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A[deploy-agent.sh] -->|auth| KC[(Keycloak)]
-    A -->|deploy/delete agent<br/>parse-env| KAG[(Kagenti API)]
+    A -->|deploy/delete agent<br/>parse-env| KAG[(Rossoctl API)]
     A -->|fetch .env| GH[(GitHub raw)]
     A -->|resolve pipeline| PY[authbridge resolver.py]
     A -->|build/patch/secrets/resources| KUBE[(kubectl → cluster)]
@@ -374,11 +374,11 @@ flowchart TB
         R --> PC
     end
 
-    subgraph cluster[Kagenti cluster · namespace team1]
+    subgraph cluster[Rossoctl cluster · namespace team1]
         MCP["MCP tool<br/>exgentic-mcp-BENCH"]
         AG["A2A agent<br/>exgentic-a2a-AGENT-BENCH"]
         GWY[MCP Gateway<br/>optional]
-        COL[OTEL collector<br/>kagenti-system]
+        COL[OTEL collector<br/>rossoctl-system]
         PROM[Prometheus<br/>istio-system]
         MLF[(MLflow)]
         LLM[[LLM endpoint<br/>OPENAI_API_BASE]]
@@ -401,11 +401,11 @@ flowchart TB
 
 | Helper | `kind` | `openshift` (needs `INGRESS_DOMAIN`) | `in-cluster` |
 |---|---|---|---|
-| `kagenti_api_url` | `kagenti-api.localtest.me:8080` | `kagenti-api-kagenti-system.<domain>` | `kagenti-backend.kagenti-system.svc:8000` |
+| `rossoctl_api_url` | `rossoctl-api.localtest.me:8080` | `rossoctl-api-rossoctl-system.<domain>` | `rossoctl-backend.rossoctl-system.svc:8000` |
 | `keycloak_api_url` | `keycloak.localtest.me:8080` | `keycloak-keycloak.<domain>` | `keycloak-service.keycloak.svc:8080` |
 | `tool_http_url` | `<tool>.<ns>.localtest.me:8080` | `<tool>-<ns>.<domain>` | `<tool>-mcp.<ns>.svc:8000` |
 | `agent_http_url` | `<agent>.<ns>.localtest.me:8080` | `<agent>-<ns>.<domain>` | `<agent>.<ns>.svc:8080` |
-| `otel_collector_url` | `localhost:4327` (port-fwd) | `localhost:4327` (port-fwd) | `otel-collector.kagenti-system.svc:8335` |
+| `otel_collector_url` | `localhost:4327` (port-fwd) | `localhost:4327` (port-fwd) | `otel-collector.rossoctl-system.svc:8335` |
 | `prometheus_url` | `localhost:9191` (port-fwd) | `localhost:9191` (port-fwd) | `prometheus.istio-system.svc:9090` |
 
 If `CLUSTER_MODE` is unset, `urls.sh` infers it: `KUBERNETES_SERVICE_HOST` ⇒

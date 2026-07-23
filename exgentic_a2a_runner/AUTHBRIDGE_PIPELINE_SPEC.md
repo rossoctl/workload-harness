@@ -30,7 +30,7 @@ This proposal generalizes the deploy scripts so they drive the pipeline by **ena
 - Backwards compatibility with the previous `--ibac` / `--authbridge` flags or their env-var aliases. They are removed.
 - Building a full YAML editor in shell. Pipeline ordering rules and slot dependency validation stay in AuthBridge (`pipeline.New`).
 - Exposing every plugin config field as a CLI flag. We ship sensible defaults; advanced users override via env vars or `--plugin-config-file`.
-- Changing the operator. The base config still comes from `kagenti-operator`; we only overlay.
+- Changing the operator. The base config still comes from `rossoctl-operator`; we only overlay.
 
 ## 3. Proposed CLI surface
 

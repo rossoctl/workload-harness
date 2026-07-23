@@ -27,12 +27,12 @@ _urls_unsupported_mode() {
     exit 1
 }
 
-kagenti_api_url() {
+rossoctl_api_url() {
     case "$CLUSTER_MODE" in
-        kind)       echo "http://kagenti-api.localtest.me:8080" ;;
-        openshift)  echo "https://kagenti-api-kagenti-system.${INGRESS_DOMAIN}" ;;
-        in-cluster) echo "http://kagenti-backend.kagenti-system.svc.cluster.local:8000" ;;
-        *)          _urls_unsupported_mode "kagenti_api_url" ;;
+        kind)       echo "http://rossoctl-api.localtest.me:8080" ;;
+        openshift)  echo "https://rossoctl-api-rossoctl-system.${INGRESS_DOMAIN}" ;;
+        in-cluster) echo "http://rossoctl-backend.rossoctl-system.svc.cluster.local:8000" ;;
+        *)          _urls_unsupported_mode "rossoctl_api_url" ;;
     esac
 }
 
@@ -95,7 +95,7 @@ otel_collector_url() {
             # Port 8335 is the HTTP/protobuf OTLP port the collector actually binds.
             # 4317 is gRPC-only; curl-based health checks and http/protobuf exporters
             # must use 8335.
-            echo "http://otel-collector.kagenti-system.svc.cluster.local:8335" ;;
+            echo "http://otel-collector.rossoctl-system.svc.cluster.local:8335" ;;
         *)          _urls_unsupported_mode "otel_collector_url" ;;
     esac
 }

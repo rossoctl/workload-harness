@@ -2,7 +2,7 @@
 # Verify kubectl is available and points to the expected cluster for CLUSTER_MODE.
 # Must be sourced after CLUSTER_MODE and KUBECTL_BIN are set.
 #
-# kind       → context must be "kind-kagenti"
+# kind       → context must be "kind-rossoctl"
 # openshift  → context must expose apps.openshift.io API groups
 # in-cluster → no check (kubectl is not available inside the Job pod)
 
@@ -35,8 +35,8 @@ check_kubectl_context() {
 
     case "$CLUSTER_MODE" in
         kind)
-            if [ "$CURRENT_CONTEXT" != "kind-kagenti" ]; then
-                echo "Error: --kind requires kubectl context 'kind-kagenti', but current context is '$CURRENT_CONTEXT'"
+            if [ "$CURRENT_CONTEXT" != "kind-rossoctl" ]; then
+                echo "Error: --kind requires kubectl context 'kind-rossoctl', but current context is '$CURRENT_CONTEXT'"
                 exit 1
             fi
             echo "Kind cluster verified (context: $CURRENT_CONTEXT)"
