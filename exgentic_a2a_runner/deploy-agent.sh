@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy and Configure agent to Kagenti cluster via API
+# Deploy and Configure agent to Rossoctl cluster via API
 # Usage: ./deploy-agent.sh --benchmark <name> --agent <name> [OPTIONS]
 # Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --model Azure/gpt-4o-mini
 # Example: ./deploy-agent.sh --benchmark tau2 --agent tool_calling --openshift apps.mycluster.example.com
@@ -208,7 +208,7 @@ if [ -n "$EXPERIMENT_NAME" ] && [ "$EXPERIMENT_NAME" != "default" ]; then
 fi
 NAMESPACE="${NAMESPACE:-team1}"
 
-# Load shared URL helpers (kagenti_api_url, keycloak_api_url, agent_http_url, …)
+# Load shared URL helpers (rossoctl_api_url, keycloak_api_url, agent_http_url, …)
 export CLUSTER_MODE INGRESS_DOMAIN
 # shellcheck source=libsh/urls.sh
 source "$SCRIPT_DIR/libsh/urls.sh"
@@ -218,7 +218,7 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 source "$SCRIPT_DIR/libsh/check-kubectl-context.sh"
 check_kubectl_context
 
-KAGENTI_API="$(kagenti_api_url)"
+ROSSOCTL_API="$(rossoctl_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
 
 echo "=========================================="
@@ -231,7 +231,7 @@ echo ""
 # Step 0: Sync local image to cluster
 if [ "$USE_LOCAL_IMAGE" = "true" ]; then
     echo "Step 0: Syncing local image to cluster..."
-    export REMOTE_IMAGE_NAME KIND_CLUSTER_NAME="kagenti"
+    export REMOTE_IMAGE_NAME KIND_CLUSTER_NAME="rossoctl"
     source "$(dirname "$0")/sync-image-to-cluster.sh"
 else
     echo "Step 0: Syncing local image to cluster... (skipped, K8s will pull from remote registry)"
@@ -264,20 +264,20 @@ echo ""
 if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     echo "Step 1.5: Attempting to fetch Keycloak password from cluster..."
     
-    # Try to get kagenti realm admin credentials from kagenti-test-user secret
-    KAGENTI_PASSWORD=$(kubectl get secret kagenti-test-user -n keycloak -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+    # Try to get rossoctl realm admin credentials from rossoctl-test-user secret
+    ROSSOCTL_PASSWORD=$(kubectl get secret rossoctl-test-user -n keycloak -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
     
-    if [ -n "$KAGENTI_PASSWORD" ]; then
+    if [ -n "$ROSSOCTL_PASSWORD" ]; then
         # Test if the fetched password works
-        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
-            -d "password=$KAGENTI_PASSWORD" \
+            -d "password=$ROSSOCTL_PASSWORD" \
             -d "grant_type=password" \
-            -d "client_id=kagenti" 2>/dev/null || echo "")
+            -d "client_id=rossoctl" 2>/dev/null || echo "")
         
         if echo "$TEST_AUTH" | grep -q "access_token"; then
-            KEYCLOAK_PASSWORD="$KAGENTI_PASSWORD"
+            KEYCLOAK_PASSWORD="$ROSSOCTL_PASSWORD"
             echo "✓ Successfully fetched and verified Keycloak password from cluster"
         else
             echo "⚠ Warning: Fetched password from cluster but authentication failed"
@@ -286,12 +286,12 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
         fi
     else
         # Fallback: test if default password works
-        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=admin" \
             -d "password=admin" \
             -d "grant_type=password" \
-            -d "client_id=kagenti" 2>/dev/null || echo "")
+            -d "client_id=rossoctl" 2>/dev/null || echo "")
         
         if echo "$TEST_AUTH" | grep -q "access_token"; then
             KEYCLOAK_PASSWORD="admin"
@@ -305,8 +305,8 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     echo ""
 fi
 
-# Step 2: Enable Direct Access Grants for kagenti client if needed
-echo "Step 2: Enabling Direct Access Grants for kagenti client..."
+# Step 2: Enable Direct Access Grants for rossoctl client if needed
+echo "Step 2: Enabling Direct Access Grants for rossoctl client..."
 
 # Get admin token first (use "admin" password for master realm)
 ADMIN_TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/master/protocol/openid-connect/token" \
@@ -320,19 +320,19 @@ if [ "$ADMIN_TOKEN_RESPONSE" != "TOKEN_ERROR" ]; then
     ADMIN_TOKEN=$(echo "$ADMIN_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"\([^"]*\)"/\1/')
     
     if [ -n "$ADMIN_TOKEN" ]; then
-        # Get kagenti client configuration
-        CLIENT_CONFIG=$(curl -s "$KEYCLOAK_API/admin/realms/kagenti/clients?clientId=kagenti" \
+        # Get rossoctl client configuration
+        CLIENT_CONFIG=$(curl -s "$KEYCLOAK_API/admin/realms/rossoctl/clients?clientId=rossoctl" \
             -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null)
         
         CLIENT_ID=$(echo "$CLIENT_CONFIG" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"\([^"]*\)"/\1/')
         
         if [ -n "$CLIENT_ID" ]; then
             # Enable direct access grants
-            curl -s -X PUT "$KEYCLOAK_API/admin/realms/kagenti/clients/$CLIENT_ID" \
+            curl -s -X PUT "$KEYCLOAK_API/admin/realms/rossoctl/clients/$CLIENT_ID" \
                 -H "Authorization: Bearer $ADMIN_TOKEN" \
                 -H "Content-Type: application/json" \
                 -d '{"directAccessGrantsEnabled": true}' >/dev/null 2>&1
-            echo "✓ Direct access grants enabled for kagenti client"
+            echo "✓ Direct access grants enabled for rossoctl client"
         fi
     fi
 fi
@@ -341,12 +341,12 @@ echo ""
 
 # Step 2.5: Verify Keycloak password works now that Direct Access Grants is enabled
 echo "Step 2.5: Verifying Keycloak authentication..."
-TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
     -d "grant_type=password" \
-    -d "client_id=kagenti" 2>/dev/null || echo "")
+    -d "client_id=rossoctl" 2>/dev/null || echo "")
 
 if ! echo "$TEST_AUTH" | grep -q "access_token"; then
     echo "⚠ Warning: Authentication failed with current password"
@@ -360,12 +360,12 @@ echo ""
 
 # Step 3: Get Keycloak authentication token
 echo "Step 3: Getting Keycloak authentication token..."
-TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
     -d "grant_type=password" \
-    -d "client_id=kagenti" || echo "TOKEN_ERROR")
+    -d "client_id=rossoctl" || echo "TOKEN_ERROR")
 
 if [ "$TOKEN_RESPONSE" = "TOKEN_ERROR" ]; then
     echo "Error: Failed to get authentication token from Keycloak"
@@ -378,7 +378,7 @@ if [ -z "$ACCESS_TOKEN" ]; then
     echo "Error: Failed to extract access token"
     echo "Response: $TOKEN_RESPONSE"
     echo ""
-    echo "If you see 'unauthorized_client' error, the kagenti client may need Direct Access Grants enabled."
+    echo "If you see 'unauthorized_client' error, the rossoctl client may need Direct Access Grants enabled."
     echo "You can enable it manually in Keycloak admin console or run this script again."
     exit 1
 fi
@@ -387,52 +387,52 @@ echo "✓ Successfully obtained authentication token"
 
 echo ""
 
-# Step 4: Verify Kagenti backend is accessible
-echo "Step 4: Verifying Kagenti backend accessibility at $KAGENTI_API..."
-KAGENTI_REACHABLE=false
+# Step 4: Verify Rossoctl backend is accessible
+echo "Step 4: Verifying Rossoctl backend accessibility at $ROSSOCTL_API..."
+ROSSOCTL_REACHABLE=false
 for i in $(seq 1 10); do
-    if curl -s --max-time 5 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-        echo "✓ Kagenti backend is accessible"
-        KAGENTI_REACHABLE=true
+    if curl -s --max-time 5 "$ROSSOCTL_API/api/v1/namespaces" >/dev/null 2>&1; then
+        echo "✓ Rossoctl backend is accessible"
+        ROSSOCTL_REACHABLE=true
         break
     fi
     sleep 1
 done
 
-if [ "$KAGENTI_REACHABLE" = false ]; then
-    echo "Error: Kagenti backend is not accessible at $KAGENTI_API after 10s"
-    echo "Please ensure Kagenti backend is reachable via HTTP route"
+if [ "$ROSSOCTL_REACHABLE" = false ]; then
+    echo "Error: Rossoctl backend is not accessible at $ROSSOCTL_API after 10s"
+    echo "Please ensure Rossoctl backend is reachable via HTTP route"
     exit 1
 fi
 
 echo ""
 
 # Step 5: Delete existing agent if it exists
-echo "Step 5: Deleting existing agent via Kagenti API if it exists..."
-DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/kagenti_delete_agent_response.txt -X DELETE "$KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
+echo "Step 5: Deleting existing agent via Rossoctl API if it exists..."
+DELETE_RESPONSE=$(curl -s --max-time 10 -w "%{http_code}" -o /tmp/rossoctl_delete_agent_response.txt -X DELETE "$ROSSOCTL_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
     -H "Authorization: Bearer $ACCESS_TOKEN") || true
 
 if [ -z "$DELETE_RESPONSE" ] || [ "$DELETE_RESPONSE" = "000" ]; then
-    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure Kagenti backend is accessible via HTTP route"
+    echo "Error: Could not connect to Rossoctl API at $ROSSOCTL_API"
+    echo "Please ensure Rossoctl backend is accessible via HTTP route"
     exit 1
 elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     echo "✓ Agent deleted or did not exist (HTTP $DELETE_RESPONSE)"
 
     if [ "$DELETE_RESPONSE" = "200" ]; then
-        echo "Step 5a: Waiting for Kagenti to finish removing the old agent record..."
+        echo "Step 5a: Waiting for Rossoctl to finish removing the old agent record..."
         GONE_WAIT=0
         GONE_MAX=30
         while true; do
             CHECK_CODE=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
-                "$KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
+                "$ROSSOCTL_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" \
                 -H "Authorization: Bearer $ACCESS_TOKEN") || CHECK_CODE="000"
             if [ "$CHECK_CODE" = "404" ]; then
                 echo "✓ Agent record confirmed gone (HTTP 404)"
                 break
             fi
             if [ $GONE_WAIT -ge $GONE_MAX ]; then
-                echo "Error: Agent record still present after ${GONE_MAX}s — Kagenti cleanup stalled" >&2
+                echo "Error: Agent record still present after ${GONE_MAX}s — Rossoctl cleanup stalled" >&2
                 exit 1
             fi
             sleep 2
@@ -441,12 +441,12 @@ elif [ "$DELETE_RESPONSE" = "200" ] || [ "$DELETE_RESPONSE" = "404" ]; then
     fi
 else
     # Any other status (e.g. 503 upstream/connection errors, 401/403) means the
-    # Kagenti API is broken or unreachable. Fail fast here rather than warn and
+    # Rossoctl API is broken or unreachable. Fail fast here rather than warn and
     # continue into later steps that all hit the same dead backend.
     echo "Error: Delete returned HTTP $DELETE_RESPONSE" >&2
-    echo "  Endpoint: $KAGENTI_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" >&2
-    echo "  Response: $(cat /tmp/kagenti_delete_response.txt)" >&2
-    echo "  The Kagenti API is not healthy; aborting deployment." >&2
+    echo "  Endpoint: $ROSSOCTL_API/api/v1/agents/$NAMESPACE/$AGENT_NAME" >&2
+    echo "  Response: $(cat /tmp/rossoctl_delete_response.txt)" >&2
+    echo "  The Rossoctl API is not healthy; aborting deployment." >&2
     exit 1
 fi
 
@@ -465,8 +465,8 @@ if [ -z "$ENV_CONTENT" ] || echo "$ENV_CONTENT" | grep -q "404: Not Found"; then
     exit 1
 fi
 
-# Parse env vars using the Kagenti API
-ENV_PARSE_RESPONSE=$(curl -s --max-time 10 -X POST "$KAGENTI_API/api/v1/agents/parse-env" \
+# Parse env vars using the Rossoctl API
+ENV_PARSE_RESPONSE=$(curl -s --max-time 10 -X POST "$ROSSOCTL_API/api/v1/agents/parse-env" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -d "{\"content\": $(echo "$ENV_CONTENT" | jq -Rs .)}") || true
@@ -514,12 +514,12 @@ if [ "$AGENT_NAME_INPUT" = "tool_calling" ]; then
     ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_SET_AGENT_ENABLE_TOOL_SHORTLISTING\", \"value\": \"true\"}]")
 fi
 
-# The kagenti-deps otel-collector listens for OTLP/HTTP on 8335 (and gRPC on
+# The rossoctl-deps otel-collector listens for OTLP/HTTP on 8335 (and gRPC on
 # 4317). The receivers ConfigMap shows 4318, but the running collector startup
 # logs ("Starting HTTP server endpoint: 0.0.0.0:8335") confirm 8335 is what's
 # actually bound. Working sibling pods (e.g. tau2) also export to 8335.
 echo "Adding EXGENTIC_OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL"
-ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://otel-collector.kagenti-system.svc.cluster.local:8335\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
+ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"EXGENTIC_OTEL_ENABLED\", \"value\": \"true\"}, {\"name\": \"OTEL_EXPORTER_OTLP_ENDPOINT\", \"value\": \"http://otel-collector.rossoctl-system.svc.cluster.local:8335\"}, {\"name\": \"OTEL_EXPORTER_OTLP_PROTOCOL\", \"value\": \"http/protobuf\"}]")
 
 # Set agent runner to thread for in-process execution (avoids venv subprocess overhead)
 echo "Adding EXGENTIC_DEFAULT_RUNNER=thread for agent"
@@ -535,8 +535,8 @@ ENV_VARS_WITH_CONFIG=$(echo "$ENV_VARS_WITH_CONFIG" | jq ". + [{\"name\": \"LITE
 echo "✓ Environment variables prepared for deployment"
 echo ""
 
-# Step 8: Deploy agent via Kagenti API
-echo "Step 8: Deploying agent via Kagenti API..."
+# Step 8: Deploy agent via Rossoctl API
+echo "Step 8: Deploying agent via Rossoctl API..."
 
 # Resolve the AuthBridge plugin pipeline from --plugin-preset, --plugin,
 # --no-plugin, and --plugin-config-file flags. The sidecar is injected
@@ -662,29 +662,29 @@ echo "Agent configuration:"
 echo "$AGENT_JSON" | jq '.'
 echo ""
 
-HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_agent_response.txt -X POST "$KAGENTI_API/api/v1/agents" \
+HTTP_CODE=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/rossoctl_agent_response.txt -X POST "$ROSSOCTL_API/api/v1/agents" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -d "$AGENT_JSON") || true
 
-RESPONSE=$(cat /tmp/kagenti_agent_response.txt)
+RESPONSE=$(cat /tmp/rossoctl_agent_response.txt)
 
 echo "API Response (HTTP $HTTP_CODE):"
 echo "$RESPONSE"
 echo ""
 
 if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
-    echo "Error: Could not connect to Kagenti API at $KAGENTI_API"
-    echo "Please ensure Kagenti backend is accessible via HTTP route"
+    echo "Error: Could not connect to Rossoctl API at $ROSSOCTL_API"
+    echo "Please ensure Rossoctl backend is accessible via HTTP route"
     exit 1
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
     echo "✓ Agent deployment successful"
 elif [ "$HTTP_CODE" = "409" ]; then
-    echo "Error: Kagenti API returned 409 — agent still exists after deletion" >&2
+    echo "Error: Rossoctl API returned 409 — agent still exists after deletion" >&2
     echo "  Response: $RESPONSE" >&2
     exit 1
 else
-    echo "Error: Kagenti API deployment failed with HTTP $HTTP_CODE"
+    echo "Error: Rossoctl API deployment failed with HTTP $HTTP_CODE"
     exit 1
 fi
 
@@ -702,7 +702,7 @@ fi
 echo ""
 
 # Step 9.5: Fix route targetPort on OpenShift.
-# Kagenti creates the route with targetPort: 8080 (the service port number), but
+# Rossoctl creates the route with targetPort: 8080 (the service port number), but
 # OpenShift resolves targetPort by name when the service port has a name. The
 # service port is named "http", so "8080" doesn't resolve and the router returns
 # 503. Patch it to the port name so the route works.

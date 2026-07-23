@@ -6,14 +6,14 @@
 #   REMOTE_IMAGE_NAME  - the full image reference (e.g. ghcr.io/exgentic/foo:latest)
 #
 # Optional env vars:
-#   KIND_CLUSTER_NAME  - name of the kind cluster (default: kagenti)
+#   KIND_CLUSTER_NAME  - name of the kind cluster (default: rossoctl)
 #
 # Exports on success:
 #   IMAGE_NAME         - set to REMOTE_IMAGE_NAME (for callers)
 
 set -e
 
-KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kagenti}"
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-rossoctl}"
 
 if [ -z "$REMOTE_IMAGE_NAME" ]; then
     echo "Error: REMOTE_IMAGE_NAME is not set"

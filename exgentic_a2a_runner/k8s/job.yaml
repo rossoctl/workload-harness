@@ -10,7 +10,7 @@ spec:
     spec:
       restartPolicy: Never
       # Uses the default ServiceAccount — no kubectl / RBAC required.
-      # All cluster interaction goes through the Kagenti API and Keycloak over HTTP.
+      # All cluster interaction goes through the Rossoctl API and Keycloak over HTTP.
       containers:
         - name: runner
           image: ghcr.io/exgentic/runner:latest
@@ -26,7 +26,7 @@ spec:
             - name: KEYCLOAK_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: kagenti-test-user
+                  name: rossoctl-test-user
                   key: password
             - name: OPENAI_API_KEY
               valueFrom:

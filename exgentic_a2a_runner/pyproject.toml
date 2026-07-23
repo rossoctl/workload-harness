@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "exgentic-a2a-runner"
 version = "0.1.0"
-description = "Exgentic Benchmark A2A Runner for Kagenti"
+description = "Exgentic Benchmark A2A Runner for Rossoctl"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

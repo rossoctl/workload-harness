@@ -180,12 +180,12 @@
 
 The implementation is ready for testing with:
 - Real Exgentic MCP server
-- Kagenti generalist agent
+- Rossoctl generalist agent
 - OTLP collector for telemetry
 
 ### To Test:
 1. Set up Exgentic MCP server
-2. Deploy Kagenti agent with A2A endpoint
+2. Deploy Rossoctl agent with A2A endpoint
 3. Configure environment variables
 4. Run: `uv run exgentic-a2a-runner`
 5. Verify session creation, execution, evaluation, and cleanup
@@ -196,9 +196,9 @@ The implementation is ready for testing with:
 All components have been successfully implemented following the requirements from GitHub Issue #963. The harness:
 
 - ✅ Integrates with Exgentic MCP server
-- ✅ Communicates with Kagenti agents via A2A
+- ✅ Communicates with Rossoctl agents via A2A
 - ✅ Implements the exact execution model specified
 - ✅ Provides comprehensive observability
 - ✅ Is fully documented and ready for deployment
 
-The implementation is **COMPLETE** and ready for integration testing with actual Exgentic MCP server and Kagenti agents.
+The implementation is **COMPLETE** and ready for integration testing with actual Exgentic MCP server and Rossoctl agents.

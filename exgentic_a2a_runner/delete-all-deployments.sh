@@ -1,5 +1,5 @@
 #!/bin/bash
-# Delete all agent and benchmark (tool) deployments from a Kagenti namespace via the API.
+# Delete all agent and benchmark (tool) deployments from a Rossoctl namespace via the API.
 # Usage: ./delete-all-deployments.sh [OPTIONS]
 # Example: ./delete-all-deployments.sh --openshift apps.mycluster.example.com
 # Example: ./delete-all-deployments.sh --kind
@@ -37,7 +37,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Delete all agent and benchmark deployments in a Kagenti namespace via the API.
+Delete all agent and benchmark deployments in a Rossoctl namespace via the API.
 
 Cluster selection (exactly one required):
   --kind                      Target local Kind cluster (default for local dev)
@@ -45,7 +45,7 @@ Cluster selection (exactly one required):
   --in-cluster                Run as a Kubernetes Job pod (uses in-cluster DNS)
 
 Options:
-  --namespace <ns>            Kagenti namespace (default: team1)
+  --namespace <ns>            Rossoctl namespace (default: team1)
   --keycloak-user <user>      Keycloak username (default: admin)
   --keycloak-pass <pass>      Keycloak password (overrides KEYCLOAK_PASSWORD env)
   --dry-run                   List what would be deleted without deleting anything
@@ -102,14 +102,14 @@ source "$SCRIPT_DIR/libsh/urls.sh"
 source "$SCRIPT_DIR/libsh/check-kubectl-context.sh"
 check_kubectl_context
 
-KAGENTI_API="$(kagenti_api_url)"
+ROSSOCTL_API="$(rossoctl_api_url)"
 KEYCLOAK_API="$(keycloak_api_url)"
 
 echo "=========================================="
 echo " Delete All Deployments"
 echo "=========================================="
 echo "  Namespace:   $NAMESPACE"
-echo "  Kagenti API: $KAGENTI_API"
+echo "  Rossoctl API: $ROSSOCTL_API"
 echo "  Dry run:     $DRY_RUN"
 echo "=========================================="
 echo ""
@@ -119,28 +119,28 @@ echo "Step 1: Getting Keycloak authentication token..."
 
 if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     echo "Step 1.5: Attempting to fetch Keycloak password from cluster..."
-    KAGENTI_PASSWORD=$("$KUBECTL_BIN" get secret kagenti-test-user -n keycloak -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-    if [ -n "$KAGENTI_PASSWORD" ]; then
-        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+    ROSSOCTL_PASSWORD=$("$KUBECTL_BIN" get secret rossoctl-test-user -n keycloak -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+    if [ -n "$ROSSOCTL_PASSWORD" ]; then
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=$KEYCLOAK_USERNAME" \
-            -d "password=$KAGENTI_PASSWORD" \
+            -d "password=$ROSSOCTL_PASSWORD" \
             -d "grant_type=password" \
-            -d "client_id=kagenti" 2>/dev/null || echo "")
+            -d "client_id=rossoctl" 2>/dev/null || echo "")
         if echo "$TEST_AUTH" | grep -q "access_token"; then
-            KEYCLOAK_PASSWORD="$KAGENTI_PASSWORD"
+            KEYCLOAK_PASSWORD="$ROSSOCTL_PASSWORD"
             echo "✓ Fetched Keycloak password from cluster"
         else
             echo "⚠ Warning: Fetched password from cluster but authentication failed"
             exit 1
         fi
     else
-        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+        TEST_AUTH=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username=$KEYCLOAK_USERNAME" \
             -d "password=admin" \
             -d "grant_type=password" \
-            -d "client_id=kagenti" 2>/dev/null || echo "")
+            -d "client_id=rossoctl" 2>/dev/null || echo "")
         if echo "$TEST_AUTH" | grep -q "access_token"; then
             KEYCLOAK_PASSWORD="admin"
             echo "✓ Using default Keycloak password"
@@ -151,12 +151,12 @@ if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     fi
 fi
 
-TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/kagenti/protocol/openid-connect/token" \
+TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/rossoctl/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "username=$KEYCLOAK_USERNAME" \
     -d "password=$KEYCLOAK_PASSWORD" \
     -d "grant_type=password" \
-    -d "client_id=kagenti" || echo "TOKEN_ERROR")
+    -d "client_id=rossoctl" || echo "TOKEN_ERROR")
 
 if [ "$TOKEN_RESPONSE" = "TOKEN_ERROR" ]; then
     echo "Error: Failed to reach Keycloak at $KEYCLOAK_API"
@@ -172,13 +172,13 @@ fi
 echo "✓ Authentication token obtained"
 echo ""
 
-# Step 2: Verify Kagenti backend is accessible
-echo "Step 2: Verifying Kagenti backend accessibility at $KAGENTI_API..."
-if ! curl -s --max-time 10 "$KAGENTI_API/api/v1/namespaces" >/dev/null 2>&1; then
-    echo "Error: Kagenti backend is not accessible at $KAGENTI_API"
+# Step 2: Verify Rossoctl backend is accessible
+echo "Step 2: Verifying Rossoctl backend accessibility at $ROSSOCTL_API..."
+if ! curl -s --max-time 10 "$ROSSOCTL_API/api/v1/namespaces" >/dev/null 2>&1; then
+    echo "Error: Rossoctl backend is not accessible at $ROSSOCTL_API"
     exit 1
 fi
-echo "✓ Kagenti backend is accessible"
+echo "✓ Rossoctl backend is accessible"
 echo ""
 
 # Step 3: Discover deployments via kubectl
@@ -222,11 +222,11 @@ wait_for_gone() {
     local elapsed=0 max=30 code
     while true; do
         code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
-            "$KAGENTI_API$api_path" \
+            "$ROSSOCTL_API$api_path" \
             -H "Authorization: Bearer $ACCESS_TOKEN") || code="000"
         [ "$code" = "404" ] && echo "    ✓ $resource_type '$name' confirmed gone" && return 0
         if [ "$elapsed" -ge "$max" ]; then
-            echo "    ⚠ $resource_type '$name' still present after ${max}s — Kagenti cleanup stalled"
+            echo "    ⚠ $resource_type '$name' still present after ${max}s — Rossoctl cleanup stalled"
             return 1
         fi
         sleep 2
@@ -240,15 +240,15 @@ if [ -n "$AGENT_NAMES" ]; then
     echo "$AGENT_NAMES" | while read -r name; do
         [ -z "$name" ] && continue
         echo -n "  Deleting agent '$name'... "
-        HTTP=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_del_agent.txt \
-            -X DELETE "$KAGENTI_API/api/v1/agents/$NAMESPACE/$name" \
+        HTTP=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/rossoctl_del_agent.txt \
+            -X DELETE "$ROSSOCTL_API/api/v1/agents/$NAMESPACE/$name" \
             -H "Authorization: Bearer $ACCESS_TOKEN") || HTTP="000"
         if [ "$HTTP" = "200" ] || [ "$HTTP" = "404" ]; then
             echo "done (HTTP $HTTP)"
             [ "$HTTP" = "200" ] && wait_for_gone "agent" "$name" "/api/v1/agents/$NAMESPACE/$name"
         else
             echo "FAILED (HTTP $HTTP)"
-            cat /tmp/kagenti_del_agent.txt
+            cat /tmp/rossoctl_del_agent.txt
         fi
     done
 else
@@ -262,15 +262,15 @@ if [ -n "$TOOL_NAMES" ]; then
     echo "$TOOL_NAMES" | while read -r name; do
         [ -z "$name" ] && continue
         echo -n "  Deleting tool '$name'... "
-        HTTP=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/kagenti_del_tool.txt \
-            -X DELETE "$KAGENTI_API/api/v1/tools/$NAMESPACE/$name" \
+        HTTP=$(curl -s --max-time 30 -w "%{http_code}" -o /tmp/rossoctl_del_tool.txt \
+            -X DELETE "$ROSSOCTL_API/api/v1/tools/$NAMESPACE/$name" \
             -H "Authorization: Bearer $ACCESS_TOKEN") || HTTP="000"
         if [ "$HTTP" = "200" ] || [ "$HTTP" = "404" ]; then
             echo "done (HTTP $HTTP)"
             [ "$HTTP" = "200" ] && wait_for_gone "tool" "$name" "/api/v1/tools/$NAMESPACE/$name"
         else
             echo "FAILED (HTTP $HTTP)"
-            cat /tmp/kagenti_del_tool.txt
+            cat /tmp/rossoctl_del_tool.txt
         fi
     done
 else
