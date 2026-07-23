@@ -236,23 +236,6 @@ def main() -> int:
     pipeline.setdefault("inbound", {})["plugins"] = inbound_entries
     pipeline.setdefault("outbound", {})["plugins"] = outbound_entries
 
-    # Ensure the OTEL collector bypasses the authbridge listener. Without this
-    # the proxy intercepts OTLP egress and resets the connection, which the
-    # exgentic library misreports as "Protocol mismatch" causing a crash-loop
-    # (issue #34). We add both the FQDN and the short name in case the exporter
-    # ever resolves via the short form.
-    otel_skip = [
-        "otel-collector.rossoctl-system.svc.cluster.local",
-        "otel-collector",
-    ]
-    listener = operator.setdefault("listener", {})
-    existing = listener.get("skip_hosts") or []
-    merged_skip = list(existing)
-    for host in otel_skip:
-        if host not in merged_skip:
-            merged_skip.append(host)
-    listener["skip_hosts"] = merged_skip
-
     sys.stdout.write(
         yaml.safe_dump(operator, default_flow_style=False, sort_keys=False)
     )
