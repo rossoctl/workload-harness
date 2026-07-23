@@ -26,7 +26,9 @@
 #   - `authbridge-proxy` post-binary-split (proxy-sidecar mode);
 #                        the operator picks this name when injecting
 #                        the proxy-sidecar binary
-# This script auto-detects which one is in the pod.
+# This script auto-detects which one is in the pod. During a rollout it
+# probes every sidecar-bearing pod each poll and succeeds as soon as any
+# reports the target SHA, so it doesn't matter which pod is "first".
 
 set -euo pipefail
 
@@ -35,57 +37,89 @@ AGENT_NAME=${2:?agent name required}
 WANT_SHA=${3:?want-sha required}
 TIMEOUT=${4:-180}
 
-# Auto-detect the authbridge container name. Sidecars are injected by
-# the AuthBridge webhook at pod-admission, so the Deployment spec only
-# lists the agent — we have to look at a running pod. Try the legacy
-# name first (`envoy-proxy`) since most clusters today still run the
-# older operator layout; fall back to the post-#411 combined name
-# (`authbridge`).
-POD_CONTAINERS=$(kubectl -n "$NAMESPACE" get pods \
-    -l app.kubernetes.io/name="$AGENT_NAME" \
-    -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null || true)
+# The operator-injected sidecar container is one of these names,
+# depending on operator version (see header comment).
 AUTHBRIDGE_CANDIDATES=(authbridge-proxy authbridge envoy-proxy)
-AUTHBRIDGE_CONTAINER=""
-for candidate in "${AUTHBRIDGE_CANDIDATES[@]}"; do
-  if echo "$POD_CONTAINERS" | tr ' ' '\n' | grep -qx "$candidate"; then
-    AUTHBRIDGE_CONTAINER="$candidate"
-    break
-  fi
-done
-if [[ -z "$AUTHBRIDGE_CONTAINER" ]]; then
-  echo "ERROR: could not find an authbridge sidecar container in pods of $AGENT_NAME." >&2
-  echo "       Looked for: ${AUTHBRIDGE_CANDIDATES[*]}." >&2
-  echo "       Containers found: ${POD_CONTAINERS:-<none>}" >&2
-  exit 1
-fi
-echo "[*] Authbridge container detected: $AUTHBRIDGE_CONTAINER"
+
+# Enumerate the agent's pods and, for each, the authbridge sidecar
+# container it carries (if any). Emits one "pod<TAB>container" line per
+# sidecar-bearing pod. We re-run this every poll iteration rather than
+# picking a single pod up front:
+#
+#   During a rollout the pod list contains, in arbitrary order, the old
+#   pod (agent-only if it predates AuthBridge, or a sidecar still serving
+#   the stale config) alongside the new pod (mounting the patched
+#   ConfigMap). The old `.items[0]` assumption picked whichever came first
+#   — often the old/agent-only pod — and then either failed to find a
+#   sidecar at all or waited forever on a pod whose config will never
+#   advance (it's being terminated). Because success is defined purely by
+#   "some sidecar reports the target SHA", we just probe every sidecar pod
+#   each round; the converged pod wins regardless of list order, and
+#   old/terminating pods that never match are harmless.
+list_sidecar_pods() {
+  kubectl -n "$NAMESPACE" get pods \
+      -l app.kubernetes.io/name="$AGENT_NAME" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{range .spec.containers[*]}{.name}{","}{end}{"\n"}{end}' \
+      2>/dev/null | while IFS='|' read -r pod containers; do
+    [[ -z "$pod" ]] && continue
+    for candidate in "${AUTHBRIDGE_CANDIDATES[@]}"; do
+      if echo "$containers" | tr ',' '\n' | grep -qx "$candidate"; then
+        printf '%s\t%s\n' "$pod" "$candidate"
+        break
+      fi
+    done
+  done
+}
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 
 echo "[*] Waiting for authbridge to load the patched config (timeout ${TIMEOUT}s)"
 echo "    target SHA: $WANT_SHA"
 
-ACTIVE_SHA=""
+SAW_SIDECAR=false     # did we ever find a sidecar-bearing pod?
+LAST_POD=""           # for the failure diagnostics
+LAST_CONTAINER=""
+LAST_SHA=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
-  ACTIVE_SHA=$(kubectl -n "$NAMESPACE" exec deploy/"$AGENT_NAME" -c "$AUTHBRIDGE_CONTAINER" -- \
-      wget -q -O - http://localhost:9093/reload/status 2>/dev/null | \
-      python3 -c 'import json, sys
+  SIDECAR_PODS=$(list_sidecar_pods || true)
+  if [[ -n "$SIDECAR_PODS" ]]; then
+    SAW_SIDECAR=true
+    while IFS=$'\t' read -r pod container; do
+      [[ -z "$pod" ]] && continue
+      LAST_POD="$pod"; LAST_CONTAINER="$container"
+      active=$(kubectl -n "$NAMESPACE" exec "$pod" -c "$container" -- \
+          wget -q -O - http://localhost:9093/reload/status 2>/dev/null | \
+          python3 -c 'import json, sys
 try:
     print(json.load(sys.stdin).get("active_config_sha256", ""))
 except Exception:
     pass' 2>/dev/null || true)
-  if [[ "$ACTIVE_SHA" == "$WANT_SHA" ]]; then
-    echo "[*] Active config SHA matches — patch is live."
-    exit 0
+      [[ -n "$active" ]] && LAST_SHA="$active"
+      if [[ "$active" == "$WANT_SHA" ]]; then
+        echo "[*] Active config SHA matches on pod $pod ($container) — patch is live."
+        exit 0
+      fi
+    done <<< "$SIDECAR_PODS"
   fi
   sleep 3
 done
 
+if ! $SAW_SIDECAR; then
+  echo "ERROR: could not find an authbridge sidecar container in pods of $AGENT_NAME." >&2
+  echo "       Looked for: ${AUTHBRIDGE_CANDIDATES[*]}." >&2
+  echo "       Pods and their containers:" >&2
+  kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name="$AGENT_NAME" \
+      -o jsonpath='{range .items[*]}{"         "}{.metadata.name}{": "}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}' >&2 2>/dev/null || true
+  exit 1
+fi
+
 echo "ERROR: authbridge active config did not match patched SHA within ${TIMEOUT}s." >&2
 echo "       want:        $WANT_SHA" >&2
-echo "       last active: ${ACTIVE_SHA:-<none>}" >&2
-echo "       Last 20 lines of the $AUTHBRIDGE_CONTAINER container:" >&2
-kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c "$AUTHBRIDGE_CONTAINER" --tail=20 >&2 || true
+echo "       last active: ${LAST_SHA:-<none>}" >&2
+if [[ -n "$LAST_POD" ]]; then
+  echo "       Last 20 lines of the $LAST_CONTAINER container (pod $LAST_POD):" >&2
+  kubectl -n "$NAMESPACE" logs "$LAST_POD" -c "$LAST_CONTAINER" --tail=20 >&2 || true
+fi
 echo >&2
 echo "       Likely causes:" >&2
 echo "         - ConfigMap parse error (look for 'reload failed' above)" >&2

@@ -629,6 +629,98 @@ PYEOF
     ) || exit 1
 fi
 
+# Step 7.5: Bake OTEL-collector skip_hosts into the NAMESPACE authbridge base
+# BEFORE the agent is created, so the sidecar has it from first pod boot — no
+# post-deploy patch of the running agent, no reload race.
+#
+# Why the namespace base and not the per-agent ConfigMap: the rossoctl operator
+# webhook force-overwrites `authbridge-config-<agent>` (server-side apply,
+# ForceOwnership) on every pod admission, so a per-agent pre-seed can't survive.
+# The one thing it does honor is the namespace-level `authbridge-runtime-config`
+# `config.yaml`, which it reads as the base and MERGES into each per-agent CM —
+# it only injects reverse_proxy_addr / reverse_proxy_backend / forward_proxy_addr
+# into `listener`, so a `listener.skip_hosts` we add here rides through untouched.
+#
+# NOTE: `skip_hosts` is an AuthBridge-*binary* listener key; it is not defined in
+# rossoctl/operator source and has NOT been verified against the sidecar's config
+# schema. If the sidecar rejects the merged config, look for a "reload failed" /
+# parse error in the sidecar container logs
+# (kubectl -n "$NAMESPACE" logs deploy/<agent> -c authbridge  # or authbridge-proxy / envoy-proxy)
+# and correct the key name/shape below. This edit is namespace-wide and persists
+# for every agent in $NAMESPACE.
+if [ "$AUTHBRIDGE_ENABLED" = "true" ] && [ "$CLUSTER_MODE" != "in-cluster" ]; then
+    echo "Step 7.5: Adding OTEL-collector skip_hosts to namespace authbridge base..."
+    NS_AB_CM="authbridge-runtime-config"
+
+    if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' 2>/dev/null; then
+        echo "Error: python3 with PyYAML is required to merge skip_hosts into $NS_AB_CM." >&2
+        echo "  Install with one of:" >&2
+        echo "    pip3 install --user pyyaml" >&2
+        echo "    brew install libyaml && pip3 install pyyaml      # macOS" >&2
+        echo "    sudo apt install python3-yaml                    # Debian/Ubuntu" >&2
+        exit 1
+    elif ! kubectl -n "$NAMESPACE" get configmap "$NS_AB_CM" >/dev/null 2>&1; then
+        echo "Error: ConfigMap $NAMESPACE/$NS_AB_CM not found." >&2
+        echo "  The operator/Helm owns this base; it must exist before deploying an" >&2
+        echo "  AuthBridge-enabled agent. We do not fabricate one here (that would drop" >&2
+        echo "  the pipeline: block and break auth). Ensure the namespace is provisioned." >&2
+        exit 1
+    else
+        CURRENT_NS_YAML=$(
+            kubectl -n "$NAMESPACE" get configmap "$NS_AB_CM" \
+                -o jsonpath='{.data.config\.yaml}'
+        )
+        MERGED_NS_YAML=$(printf '%s' "$CURRENT_NS_YAML" | python3 - <<'PYEOF'
+import sys
+import yaml
+
+# Hosts the sidecar must NOT intercept (OTEL collector, rossoctl-system).
+SKIP_HOSTS = [
+    "otel-collector.rossoctl-system.svc.cluster.local",
+    "otel-collector",
+]
+
+cfg = yaml.safe_load(sys.stdin.read()) or {}
+listener = cfg.get("listener")
+if not isinstance(listener, dict):
+    listener = {}
+existing = listener.get("skip_hosts")
+if not isinstance(existing, list):
+    existing = []
+# Union + sort + de-dupe so re-runs are byte-stable and we don't clobber
+# hosts someone else added.
+listener["skip_hosts"] = sorted(set(existing) | set(SKIP_HOSTS))
+cfg["listener"] = listener
+# sort_keys=True keeps output deterministic across runs for the no-op check.
+sys.stdout.write(yaml.safe_dump(cfg, default_flow_style=False, sort_keys=True))
+PYEOF
+        ) || { echo "Error: skip_hosts merge failed for $NAMESPACE/$NS_AB_CM (bad YAML in config.yaml?)" >&2; exit 1; }
+
+        if [ -z "$MERGED_NS_YAML" ]; then
+            echo "Error: skip_hosts merge produced empty output for $NAMESPACE/$NS_AB_CM" >&2
+            exit 1
+        elif [ "$CURRENT_NS_YAML" = "$MERGED_NS_YAML" ]; then
+            echo "✓ Namespace authbridge base already has skip_hosts — nothing to patch"
+        else
+            TMP_NS_CONFIG=$(mktemp)
+            printf '%s' "$MERGED_NS_YAML" >"$TMP_NS_CONFIG"
+            # Conflict-free create --dry-run | apply (same pattern as apply-pipeline.sh).
+            if kubectl -n "$NAMESPACE" create configmap "$NS_AB_CM" \
+                --from-file=config.yaml="$TMP_NS_CONFIG" \
+                --dry-run=client -o yaml \
+                | kubectl -n "$NAMESPACE" apply -f - >/dev/null; then
+                echo "✓ skip_hosts added to $NAMESPACE/$NS_AB_CM"
+                rm -f "$TMP_NS_CONFIG"
+            else
+                echo "Error: could not apply skip_hosts to $NAMESPACE/$NS_AB_CM" >&2
+                rm -f "$TMP_NS_CONFIG"
+                exit 1
+            fi
+        fi
+    fi
+    echo ""
+fi
+
 AGENT_JSON=$(cat <<EOF
 {
   "name": "$AGENT_NAME",
