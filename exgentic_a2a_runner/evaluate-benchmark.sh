@@ -265,15 +265,68 @@ PROMETHEUS_LOCAL_PORT="${PROMETHEUS_LOCAL_PORT:-9191}"
 PROMETHEUS_NAMESPACE="istio-system"
 PROMETHEUS_SERVICE="prometheus"
 
+PF_OTEL_COLLECTOR_LOG=""
+PF_PROMETHEUS_LOG=""
+
+# Ensure a local TCP port is free before we try to bind a port-forward to it.
+# A common failure mode is a stale (or suspended) kubectl port-forward left over
+# from a previous run still holding the port; detect that case and clear it.
+free_local_port() {
+    local port="$1"
+    local label="$2"
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local pids
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN -n -P 2>/dev/null | sort -u)"
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    # Only auto-kill leftover kubectl port-forwards; refuse to touch anything else.
+    local stale_pids=""
+    local pid
+    for pid in $pids; do
+        local cmd
+        cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+        if echo "$cmd" | grep -q "port-forward"; then
+            stale_pids="$stale_pids $pid"
+        fi
+    done
+
+    if [ -z "$stale_pids" ]; then
+        echo "Error: local port $port (for $label) is in use by a non-kubectl process:"
+        # shellcheck disable=SC2086
+        ps -o pid=,command= -p $pids 2>/dev/null | sed 's/^/    /'
+        echo "  Free the port or set the corresponding *_LOCAL_PORT env var, then retry."
+        exit 1
+    fi
+
+    echo "  Found stale kubectl port-forward on port $port ($label); cleaning up..."
+    # shellcheck disable=SC2086
+    kill $stale_pids 2>/dev/null || true
+    sleep 1
+    # shellcheck disable=SC2086
+    kill -9 $stale_pids 2>/dev/null || true
+}
+
+# Start a kubectl port-forward, capturing output so we can surface the real
+# error if it dies. Sets the named PID/LOG variables via the caller.
 if [ "$CLUSTER_MODE" != "in-cluster" ]; then
     if [ "$MLFLOW_ENABLED" = "true" ]; then
         echo "Starting port-forward for OTEL collector (traces -> MLflow)..."
-        "$KUBECTL_BIN" port-forward -n $OTEL_COLLECTOR_NAMESPACE svc/$OTEL_COLLECTOR_SERVICE ${OTEL_COLLECTOR_LOCAL_PORT}:4317 >/dev/null 2>&1 &
+        free_local_port "$OTEL_COLLECTOR_LOCAL_PORT" "OTEL collector"
+        PF_OTEL_COLLECTOR_LOG="$(mktemp -t otel-pf.XXXXXX)"
+        "$KUBECTL_BIN" port-forward -n $OTEL_COLLECTOR_NAMESPACE svc/$OTEL_COLLECTOR_SERVICE ${OTEL_COLLECTOR_LOCAL_PORT}:4317 >"$PF_OTEL_COLLECTOR_LOG" 2>&1 &
         PF_OTEL_COLLECTOR_PID=$!
     fi
 
     echo "Starting port-forward for Prometheus..."
-    "$KUBECTL_BIN" port-forward -n $PROMETHEUS_NAMESPACE svc/$PROMETHEUS_SERVICE ${PROMETHEUS_LOCAL_PORT}:9090 >/dev/null 2>&1 &
+    free_local_port "$PROMETHEUS_LOCAL_PORT" "Prometheus"
+    PF_PROMETHEUS_LOG="$(mktemp -t prom-pf.XXXXXX)"
+    "$KUBECTL_BIN" port-forward -n $PROMETHEUS_NAMESPACE svc/$PROMETHEUS_SERVICE ${PROMETHEUS_LOCAL_PORT}:9090 >"$PF_PROMETHEUS_LOG" 2>&1 &
     PF_PROMETHEUS_PID=$!
 
     if [ "$MLFLOW_ENABLED" = "true" ]; then
@@ -282,6 +335,10 @@ if [ "$CLUSTER_MODE" != "in-cluster" ]; then
 
         if ! ps -p $PF_OTEL_COLLECTOR_PID > /dev/null; then
             echo "Error: OTEL collector port-forward failed to start"
+            if [ -n "$PF_OTEL_COLLECTOR_LOG" ] && [ -s "$PF_OTEL_COLLECTOR_LOG" ]; then
+                echo "  kubectl output:"
+                sed 's/^/    /' "$PF_OTEL_COLLECTOR_LOG"
+            fi
             exit 1
         fi
 
@@ -306,6 +363,8 @@ cleanup() {
         echo "Stopping Prometheus port-forward..."
         kill $PF_PROMETHEUS_PID 2>/dev/null || true
     fi
+    [ -n "$PF_OTEL_COLLECTOR_LOG" ] && rm -f "$PF_OTEL_COLLECTOR_LOG"
+    [ -n "$PF_PROMETHEUS_LOG" ] && rm -f "$PF_PROMETHEUS_LOG"
     echo "Done."
 }
 

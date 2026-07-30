@@ -100,6 +100,8 @@ export CLUSTER_MODE INGRESS_DOMAIN
 source "$SCRIPT_DIR/libsh/urls.sh"
 # shellcheck source=libsh/check-kubectl-context.sh
 source "$SCRIPT_DIR/libsh/check-kubectl-context.sh"
+# shellcheck source=libsh/keycloak-direct-access.sh
+source "$SCRIPT_DIR/libsh/keycloak-direct-access.sh"
 check_kubectl_context
 
 ROSSOCTL_API="$(rossoctl_api_url)"
@@ -116,6 +118,10 @@ echo ""
 
 # Step 1: Get Keycloak authentication token
 echo "Step 1: Getting Keycloak authentication token..."
+
+# The token requests below use grant_type=password against the rossoctl client,
+# which requires Direct Access Grants to be enabled on that client.
+enable_direct_access_grants
 
 if [ "$KEYCLOAK_PASSWORD" = "unknown" ]; then
     echo "Step 1.5: Attempting to fetch Keycloak password from cluster..."

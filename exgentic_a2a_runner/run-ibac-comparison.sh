@@ -15,6 +15,10 @@
 #   --max-parallel-sessions N      Number of concurrent evaluation sessions (default: 1)
 #   --plugin-preset PRESET         Plugin preset for the first run:
 #                                  auth-only | ibac-only | full (default: ibac-only)
+#   --kind                         Target a local Kind cluster (default)
+#   --openshift DOMAIN             Target an OpenShift cluster with the given ingress domain
+#   --in-cluster                   Running as a Kubernetes Job inside the cluster
+#   --dry                          Dry run mode - print commands without executing them
 #   -h, --help                     Show this help and exit
 #
 # The judge is configured from the OPENAI_API_BASE / OPENAI_API_KEY environment
@@ -24,6 +28,7 @@
 #   ./run-ibac-comparison.sh
 #   ./run-ibac-comparison.sh --model gcp/gemini-3-flash-preview --benchmark gsm8k --max-tasks 10 --max-parallel-sessions 1
 #   ./run-ibac-comparison.sh --plugin-preset full
+#   ./run-ibac-comparison.sh --plugin-preset auth-only --benchmark gsm8k --openshift apps.mycluster.example.com
 
 set -euo pipefail
 
@@ -36,6 +41,11 @@ AGENT="tool_calling"
 MAX_TASKS=10
 MAX_PARALLEL_SESSIONS=1
 PLUGIN_PRESET="ibac-only"
+DRY_RUN="false"
+
+# Cluster-mode flag forwarded verbatim to deploy-and-evaluate.sh (which validates
+# it). Empty means "unset" — the sub-scripts then apply their own default.
+CLUSTER_FLAG=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -63,8 +73,24 @@ while [[ $# -gt 0 ]]; do
             PLUGIN_PRESET="$2"
             shift 2
             ;;
+        --kind)
+            CLUSTER_FLAG=(--kind)
+            shift
+            ;;
+        --openshift)
+            CLUSTER_FLAG=(--openshift "$2")
+            shift 2
+            ;;
+        --in-cluster)
+            CLUSTER_FLAG=(--in-cluster)
+            shift
+            ;;
+        --dry)
+            DRY_RUN="true"
+            shift
+            ;;
         -h|--help)
-            sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -119,11 +145,35 @@ echo "Plugin preset:          $PLUGIN_PRESET"
 echo "Experiment id:          $EXPERIMENT_ID"
 echo "Plugin experiment:      $EXPERIMENT_PLUGIN"
 echo "Baseline experiment:    $EXPERIMENT_BASE"
+if [ ${#CLUSTER_FLAG[@]} -gt 0 ]; then
+    echo "Cluster mode:           ${CLUSTER_FLAG[*]}"
+else
+    echo "Cluster mode:           <default>"
+fi
+echo "Dry run:                $DRY_RUN"
 echo "=========================================="
 
+# In dry-run mode, print each command instead of executing it, and forward
+# --dry to deploy-and-evaluate.sh so its own steps are printed rather than run.
+DRY_FLAG=()
+if [ "$DRY_RUN" = "true" ]; then
+    DRY_FLAG=(--dry)
+fi
+
+run_step() {
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "[DRY RUN] Would execute:"
+        printf '%q ' "$@"
+        echo ""
+        echo ""
+    else
+        "$@"
+    fi
+}
+
 # Run 1: with the selected plugin preset.
-"$SCRIPT_DIR/delete-all-deployments.sh"
-env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
+run_step "$SCRIPT_DIR/delete-all-deployments.sh" ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"}
+run_step env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
     IBAC_JUDGE_MODEL="$MODEL" \
     JUDGE_BEARER="$OPENAI_API_KEY" \
     "$SCRIPT_DIR/deploy-and-evaluate.sh" \
@@ -133,11 +183,13 @@ env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
         --max-tasks "$MAX_TASKS" \
         --max-parallel-sessions "$MAX_PARALLEL_SESSIONS" \
         --plugin-preset "$PLUGIN_PRESET" \
-        --experiment "$EXPERIMENT_PLUGIN"
+        --experiment "$EXPERIMENT_PLUGIN" \
+        ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"} \
+        ${DRY_FLAG[@]+"${DRY_FLAG[@]}"}
 
 # Run 2: baseline (no plugin preset).
-"$SCRIPT_DIR/delete-all-deployments.sh"
-env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
+run_step "$SCRIPT_DIR/delete-all-deployments.sh" ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"}
+run_step env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
     IBAC_JUDGE_MODEL="$MODEL" \
     JUDGE_BEARER="$OPENAI_API_KEY" \
     "$SCRIPT_DIR/deploy-and-evaluate.sh" \
@@ -146,7 +198,15 @@ env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
         --model "openai/$MODEL" \
         --max-tasks "$MAX_TASKS" \
         --max-parallel-sessions "$MAX_PARALLEL_SESSIONS" \
-        --experiment "$EXPERIMENT_BASE"
+        --experiment "$EXPERIMENT_BASE" \
+        ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"} \
+        ${DRY_FLAG[@]+"${DRY_FLAG[@]}"}
 
 # Compare the two runs.
-"$SCRIPT_DIR/analyze-run.sh" -c "${EXPERIMENT_PLUGIN},${EXPERIMENT_BASE}"
+run_step "$SCRIPT_DIR/analyze-run.sh" -c "${EXPERIMENT_PLUGIN},${EXPERIMENT_BASE}"
+
+if [ "$DRY_RUN" = "true" ]; then
+    echo "=========================================="
+    echo "✓ Dry run completed - no commands executed"
+    echo "=========================================="
+fi

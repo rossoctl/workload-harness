@@ -240,6 +240,8 @@ source "$SCRIPT_DIR/libsh/urls.sh"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 # shellcheck source=libsh/check-kubectl-context.sh
 source "$SCRIPT_DIR/libsh/check-kubectl-context.sh"
+# shellcheck source=libsh/keycloak-direct-access.sh
+source "$SCRIPT_DIR/libsh/keycloak-direct-access.sh"
 check_kubectl_context
 
 ROSSOCTL_API="$(rossoctl_api_url)"
@@ -331,35 +333,7 @@ fi
 
 # Step 2: Enable Direct Access Grants for rossoctl client if needed
 echo "Step 2: Enabling Direct Access Grants for rossoctl client..."
-
-# Get admin token first (use "admin" password for master realm)
-ADMIN_TOKEN_RESPONSE=$(curl -s -X POST "$KEYCLOAK_API/realms/master/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=admin" \
-    -d "password=admin" \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" 2>/dev/null || echo "TOKEN_ERROR")
-
-if [ "$ADMIN_TOKEN_RESPONSE" != "TOKEN_ERROR" ]; then
-    ADMIN_TOKEN=$(echo "$ADMIN_TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"\([^"]*\)"/\1/')
-    
-    if [ -n "$ADMIN_TOKEN" ]; then
-        # Get rossoctl client configuration
-        CLIENT_CONFIG=$(curl -s "$KEYCLOAK_API/admin/realms/rossoctl/clients?clientId=rossoctl" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null)
-        
-        CLIENT_ID=$(echo "$CLIENT_CONFIG" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"\([^"]*\)"/\1/')
-        
-        if [ -n "$CLIENT_ID" ]; then
-            # Enable direct access grants
-            curl -s -X PUT "$KEYCLOAK_API/admin/realms/rossoctl/clients/$CLIENT_ID" \
-                -H "Authorization: Bearer $ADMIN_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{"directAccessGrantsEnabled": true}' >/dev/null 2>&1
-            echo "✓ Direct access grants enabled for rossoctl client"
-        fi
-    fi
-fi
+enable_direct_access_grants
 
 echo ""
 

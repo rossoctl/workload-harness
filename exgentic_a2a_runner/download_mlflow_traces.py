@@ -46,6 +46,17 @@ MIN_DURATION_S = float(os.environ.get("MIN_DURATION_S", "0.1"))
 
 CUTOFF_MS = int(time.time() * 1000) - WINDOW_MS
 
+
+class MLflowAuthError(Exception):
+    """Raised when MLflow rejects the token (401/403).
+
+    A valid token can still be refused: mlflow-oidc-auth only populates its
+    user/permission DB during the interactive browser login (the OIDC
+    authorization-code callback). A raw bearer token from a fresh cluster maps
+    to no user record, so the traces API returns 403 until someone logs into
+    the MLflow UI once. The shell wrapper turns this into an actionable hint.
+    """
+
 # When talking to a port-forwarded reencrypt HTTPS endpoint the cert won't
 # validate against localhost, so allow opting out of verification.
 _SSL_CONTEXT = ssl._create_unverified_context() if MLFLOW_INSECURE_TLS else None
@@ -61,8 +72,16 @@ def mlflow_get(path: str) -> dict:
     if MLFLOW_WORKSPACE:
         headers["x-mlflow-workspace"] = MLFLOW_WORKSPACE
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30, context=_SSL_CONTEXT) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CONTEXT) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # A valid token can still be refused (403) when MLflow has no user
+        # record for it yet — see MLflowAuthError. Surface that distinctly so
+        # the wrapper can point the user at the UI-login fix.
+        if e.code in (401, 403):
+            raise MLflowAuthError(f"HTTP {e.code} {e.reason}") from e
+        raise
 
 
 def _is_long_enough(trace: dict) -> bool:
@@ -279,5 +298,19 @@ def main() -> int:
     return 0
 
 
+# Distinct exit code for "token rejected by MLflow" so the shell wrapper can
+# print the UI-login fix instead of a generic failure.
+AUTH_EXIT_CODE = 75
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except MLflowAuthError as e:
+        print(
+            f"\nMLflow rejected the token ({e}).\n"
+            "Even a valid token has no permissions until MLflow records the "
+            "user, which mlflow-oidc-auth only does after an interactive UI "
+            "login. Log into the MLflow web UI once, then re-run this analysis.",
+            file=sys.stderr,
+        )
+        sys.exit(AUTH_EXIT_CODE)
