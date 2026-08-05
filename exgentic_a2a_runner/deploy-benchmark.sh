@@ -17,6 +17,7 @@ USE_MCP_GATEWAY="false"
 USE_LOCAL_IMAGE="false"
 CLUSTER_MODE=""
 ACTION_TIMEOUT="1000"
+SUBSET=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ACTION_TIMEOUT="$2"
             shift 2
             ;;
+        --subset)
+            SUBSET="$2"
+            shift 2
+            ;;
         --kind)
             CLUSTER_MODE="kind"
             shift
@@ -76,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --experiment NAME          Experiment name suffix appended to pod names (default: default)"
             echo "  --model MODEL              Model name (default: Azure/gpt-4.1)"
             echo "  --action-timeout SECONDS   Per-action step timeout in seconds (default: 30)"
+            echo "  --subset NAME              Tau2 domain to load: retail|airline|mock|telecom (default: retail)"
             echo "  --keycloak-user USER       Keycloak username (default: admin)"
             echo "  --keycloak-pass PASS       Keycloak password (auto-detected from cluster if not provided)"
             echo "  --use-mcp-gateway          Register MCP server with the MCP Gateway"
@@ -443,6 +449,15 @@ fi
 if [ -n "$ACTION_TIMEOUT" ]; then
     echo "Adding EXGENTIC_SET_BENCHMARK_ACTION_TIMEOUT=$ACTION_TIMEOUT"
     ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"EXGENTIC_SET_BENCHMARK_ACTION_TIMEOUT\", \"value\": \"$ACTION_TIMEOUT\"}]")
+fi
+
+# SUBSET is a bare env var read directly by entrypoint.sh (--subset $SUBSET),
+# not one of the EXGENTIC_SET_* --set-style config keys. Only tau2 supports it
+# (retail/airline/mock/telecom domains); requires an image built from
+# Exgentic/exgentic feature/mcp-command at or after commit ae4f1c9.
+if [ -n "$SUBSET" ]; then
+    echo "Adding SUBSET=$SUBSET"
+    ENV_VARS=$(echo "$ENV_VARS" | jq ". + [{\"name\": \"SUBSET\", \"value\": \"$SUBSET\"}]")
 fi
 
 echo "✓ Environment variables prepared for deployment"
