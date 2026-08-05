@@ -1,0 +1,14 @@
+# SPARC plugin fragment.
+#
+# ${VAR} placeholders are expanded by apply-pipeline.sh (envsubst) before
+# the merge runs. SPARC_REFLECTOR_ENDPOINT defaults to the in-cluster
+# sparc-service deployed by kagenti-extensions.
+name: sparc
+config:
+  reflector_endpoint: "${SPARC_REFLECTOR_ENDPOINT}"
+  enforcement: "mcp"
+  track: "fast_track"
+  on_reject_action: "observe"
+  deny_score_threshold: 0
+  fail_policy: "open"
+  timeout_ms: ${SPARC_TIMEOUT_MS}

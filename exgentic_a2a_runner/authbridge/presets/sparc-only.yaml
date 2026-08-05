@@ -1,0 +1,6 @@
+# sparc-only preset.
+# SPARC guardrails without inbound auth (e.g. an upstream gateway has already
+# terminated auth, or the runner calls the agent directly without a JWT).
+# Outbound SPARC needs the parsers to populate extension slots.
+inbound:  [a2a-parser]
+outbound: [inference-parser, mcp-parser, sparc]

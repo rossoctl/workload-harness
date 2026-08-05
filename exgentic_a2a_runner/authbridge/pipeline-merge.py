@@ -49,7 +49,8 @@ OUTBOUND_ORDER: list[str] = [
     "token-broker",     # gate (mutex with token-exchange)
     "inference-parser", # observe-only, after token gate
     "mcp-parser",       # observe-only, after token gate
-    "ibac",             # last: reads parser extension slots
+    "sparc",            # semantic pre-execution guardrail; reads parser slots
+    "ibac",             # intent-based access control; reads parser extension slots
 ]
 
 CHAIN_FOR: dict[str, str] = {p: "inbound" for p in INBOUND_ORDER}
