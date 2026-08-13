@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 
@@ -285,141 +285,234 @@ def format_time(iso: str) -> str:
         return iso[:19].replace("T", " ") if iso else ""
 
 
-def print_report(records: list[TraceRecord]) -> None:
-    if not records:
-        print("No Agent.Session traces found.")
-        return
+def record_to_dict(r: TraceRecord) -> dict:
+    """Serialize a TraceRecord to a JSON-friendly dict (all fields are scalars/None)."""
+    return asdict(r)
 
-    # Group by (experiment_name, agent_name, benchmark_name, model, num_parallel)
+
+def _timing_stats(values: list[float]) -> dict:
+    """avg/p50/p95/min/max for a timing series (0.0 across the board when empty)."""
+    if not values:
+        return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "avg": avg(values),
+        "p50": percentile(values, 0.5),
+        "p95": percentile(values, 0.95),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def build_group_summaries(records: list[TraceRecord]) -> list[dict]:
+    """Aggregate per-group statistics mirroring the printed report.
+
+    Groups by (experiment_name, agent_name, benchmark_name, model, num_parallel)
+    and reuses the same avg/percentile/std helpers used to print the tables.
+    """
     groups: dict[tuple, list[TraceRecord]] = defaultdict(list)
     for r in records:
         key = (r.experiment_name, r.agent_name, r.benchmark_name, r.model, r.num_parallel)
         groups[key].append(r)
 
+    summaries: list[dict] = []
     for key, traces in sorted(groups.items()):
         experiment, agent, benchmark, model, num_parallel = key
         n = len(traces)
         errors = sum(1 for t in traces if t.status == "ERROR")
         eval_success = sum(1 for t in traces if t.evaluation_result is True)
 
+        llm_counts_after_obs = [float(t.llm_count_after_obs) for t in traces]
+        tool_counts = [float(t.tool_count) for t in traces]
+        input_tokens = [float(t.llm_input_tokens) for t in traces]
+        output_tokens = [float(t.llm_output_tokens) for t in traces]
+        total_tokens = [i + o for i, o in zip(input_tokens, output_tokens)]
+
+        summary = {
+            "experiment_name": experiment,
+            "agent_name": agent,
+            "benchmark_name": benchmark,
+            "model": model,
+            "num_parallel": num_parallel,
+            "counts": {
+                "traces": n,
+                "errors": errors,
+                "eval_success": eval_success,
+            },
+            "timing": {
+                "total": _timing_stats([t.total_latency_s for t in traces]),
+                "session_creation": _timing_stats([t.session_creation_s for t in traces]),
+                "agent_call": _timing_stats([t.agent_call_s for t in traces]),
+                "time_to_first_obs": _timing_stats([t.time_to_first_obs_s for t in traces]),
+                "llm_after_obs": _timing_stats([t.llm_after_obs_s for t in traces]),
+                "tool_total": _timing_stats([t.tool_total_s for t in traces]),
+                "overhead": _timing_stats([t.overhead_s for t in traces]),
+                "evaluation": _timing_stats([t.evaluation_s for t in traces]),
+            },
+            "llm_calls_after_obs": {"avg": avg(llm_counts_after_obs), "std": std(llm_counts_after_obs)},
+            "tool_calls": {"avg": avg(tool_counts), "std": std(tool_counts)},
+            "input_tokens": {"avg": avg(input_tokens), "std": std(input_tokens)},
+            "output_tokens": {"avg": avg(output_tokens), "std": std(output_tokens)},
+            "total_tokens": {"avg": avg(total_tokens), "std": std(total_tokens)},
+        }
+
+        # Per-trace latency averages (only for traces that had calls)
+        llm_latencies = [t.llm_after_obs_s / t.llm_count_after_obs for t in traces if t.llm_count_after_obs > 0]
+        tool_latencies = [t.tool_total_s / t.tool_count for t in traces if t.tool_count > 0]
+        summary["llm_call_latency_s"] = {"avg": avg(llm_latencies), "std": std(llm_latencies)}
+        summary["tool_call_latency_s"] = {"avg": avg(tool_latencies), "std": std(tool_latencies)}
+
+        # % of agent call time
+        ttfo_pcts = [(t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0.0 for t in traces]
+        llm_pcts = [(t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0.0 for t in traces]
+        tool_pcts = [(t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0.0 for t in traces]
+        overhead_pcts = [(t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0.0 for t in traces]
+        summary["ttfo_pct"] = {"avg": avg(ttfo_pcts), "std": std(ttfo_pcts)}
+        summary["llm_pct"] = {"avg": avg(llm_pcts), "std": std(llm_pcts)}
+        summary["tool_pct"] = {"avg": avg(tool_pcts), "std": std(tool_pcts)}
+        summary["overhead_pct"] = {"avg": avg(overhead_pcts), "std": std(overhead_pcts)}
+
+        infra_traces = [t for t in traces if t.has_infra]
+        if infra_traces:
+            infra: dict = {"n": len(infra_traces)}
+            for pod_key in ("mcp", "a2a"):
+                pod_stats = {}
+                for metric in (
+                    "cpu_utilization_pct",
+                    "throttle_pct",
+                    "memory_max_mb",
+                    "memory_utilization_pct",
+                    "network_rx_mb",
+                    "network_tx_mb",
+                ):
+                    vals = [getattr(t, f"{pod_key}_{metric}") for t in infra_traces]
+                    pod_stats[metric] = {
+                        "avg": avg(vals),
+                        "p50": percentile(vals, 0.5),
+                        "max": max(vals) if vals else 0.0,
+                    }
+                infra[pod_key] = pod_stats
+            summary["infra"] = infra
+
+        summaries.append(summary)
+
+    return summaries
+
+
+def build_analysis_json(records: list[TraceRecord]) -> dict:
+    """Full analysis payload: per-trace records plus aggregated group summaries."""
+    return {
+        "traces": [record_to_dict(r) for r in records],
+        "groups": build_group_summaries(records),
+    }
+
+
+def print_report(records: list[TraceRecord]) -> None:
+    if not records:
+        print("No Agent.Session traces found.")
+        return
+
+    summaries = build_group_summaries(records)
+
+    for s in summaries:
+        experiment = s["experiment_name"]
+        agent = s["agent_name"]
+        benchmark = s["benchmark_name"]
+        model = s["model"]
+        num_parallel = s["num_parallel"]
+        counts = s["counts"]
+        n = counts["traces"]
+        errors = counts["errors"]
+        eval_success = counts["eval_success"]
+        timing = s["timing"]
+
         print("=" * 100)
         print(f"Experiment: {experiment}  |  Agent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}  |  Parallel: {num_parallel}")
         print("=" * 100)
         print()
 
-        # Counts
         print(f"  Traces:              {n}")
         print(f"  Errors:              {errors}")
         print(f"  Eval Success:        {eval_success}/{n} ({eval_success / n * 100:.0f}%)")
         print()
 
-        # Timing breakdown
-        creation_times = [t.session_creation_s for t in traces]
-        agent_times = [t.agent_call_s for t in traces]
-        eval_times = [t.evaluation_s for t in traces]
-        llm_after_obs_times = [t.llm_after_obs_s for t in traces]
-        tool_times = [t.tool_total_s for t in traces]
-        ttfo_times = [t.time_to_first_obs_s for t in traces]
-        overhead_times = [t.overhead_s for t in traces]
-        total_times = [t.total_latency_s for t in traces]
-        llm_counts = [t.llm_count for t in traces]
-        tool_counts = [t.tool_count for t in traces]
-
         print(f"  {'Timing':<30s} {'Avg':>9s} {'P50':>9s} {'P95':>9s} {'Min':>9s} {'Max':>9s}")
         print(f"  {'-' * 30} {'-' * 9} {'-' * 9} {'-' * 9} {'-' * 9} {'-' * 9}")
 
-        def row(label: str, values: list[float]) -> None:
-            if not values or all(v == 0 for v in values):
+        def row(label: str, ts: dict) -> None:
+            if ts["avg"] == 0 and ts["max"] == 0:
                 print(f"  {label:<30s} {'n/a':>9s}")
                 return
             print(
-                f"  {label:<30s} {avg(values):>9.2f} {percentile(values, 0.5):>9.2f} "
-                f"{percentile(values, 0.95):>9.2f} {min(values):>9.2f} {max(values):>9.2f}"
+                f"  {label:<30s} {ts['avg']:>9.2f} {ts['p50']:>9.2f} "
+                f"{ts['p95']:>9.2f} {ts['min']:>9.2f} {ts['max']:>9.2f}"
             )
 
-        row("Total (s)", total_times)
-        row("Session Creation (s)", creation_times)
-        row("Agent Call (s)", agent_times)
-        row("  Time to 1st Obs (s)", ttfo_times)
-        row("  LLM Calls (s)", llm_after_obs_times)
-        row("  Tool Calls (s)", tool_times)
-        row("  Overhead (s)", overhead_times)
-        row("Evaluation (s)", eval_times)
+        row("Total (s)", timing["total"])
+        row("Session Creation (s)", timing["session_creation"])
+        row("Agent Call (s)", timing["agent_call"])
+        row("  Time to 1st Obs (s)", timing["time_to_first_obs"])
+        row("  LLM Calls (s)", timing["llm_after_obs"])
+        row("  Tool Calls (s)", timing["tool_total"])
+        row("  Overhead (s)", timing["overhead"])
+        row("Evaluation (s)", timing["evaluation"])
 
         print()
-        llm_counts_f = [float(x) for x in llm_counts]
-        tool_counts_f = [float(x) for x in tool_counts]
-        llm_counts_after_obs_f = [float(t.llm_count_after_obs) for t in traces]
-        print(f"  Avg LLM calls/session:     {avg(llm_counts_after_obs_f):.1f}  (std: {std(llm_counts_after_obs_f):.1f})")
-        print(f"  Avg Tool calls/session:    {avg(tool_counts_f):.1f}  (std: {std(tool_counts_f):.1f})")
-        if any(llm_after_obs_times):
-            llm_latencies = [t.llm_after_obs_s / max(t.llm_count_after_obs, 1) for t in traces if t.llm_count_after_obs > 0]
-            print(f"  Avg LLM call latency:      {avg(llm_latencies):.2f}s  (std: {std(llm_latencies):.2f}s)")
-        if any(tool_times):
-            tool_latencies = [t.tool_total_s / max(t.tool_count, 1) for t in traces if t.tool_count > 0]
-            print(f"  Avg Tool call latency:     {avg(tool_latencies):.2f}s  (std: {std(tool_latencies):.2f}s)")
+        llm = s["llm_calls_after_obs"]
+        tools = s["tool_calls"]
+        print(f"  Avg LLM calls/session:     {llm['avg']:.1f}  (std: {llm['std']:.1f})")
+        print(f"  Avg Tool calls/session:    {tools['avg']:.1f}  (std: {tools['std']:.1f})")
+        if llm["avg"] > 0:
+            print(f"  Avg LLM call latency:      {s['llm_call_latency_s']['avg']:.2f}s  (std: {s['llm_call_latency_s']['std']:.2f}s)")
+        if tools["avg"] > 0:
+            print(f"  Avg Tool call latency:     {s['tool_call_latency_s']['avg']:.2f}s  (std: {s['tool_call_latency_s']['std']:.2f}s)")
 
-        # Time breakdown as % of agent call time
-        # TTFO = time before first observation (includes first LLM call + startup)
-        # LLM = LLM calls AFTER initial observation only
-        # Tool = tool calls (excluding initial_observation)
-        # Overhead = remaining time (inter-call gaps, serialization, etc.)
-        ttfo_pcts = [(t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
-        llm_pcts = [(t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
-        tool_pcts = [(t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
-        overhead_pcts = [(t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0 for t in traces]
-        if any(ttfo_pcts):
-            print(f"  Avg % time before 1st Obs: {avg(ttfo_pcts):.1f}%  (std: {std(ttfo_pcts):.1f}%)")
-        if any(llm_pcts):
-            print(f"  Avg % time on LLM calls:   {avg(llm_pcts):.1f}%  (std: {std(llm_pcts):.1f}%)")
-        if any(tool_pcts):
-            print(f"  Avg % time on Tool calls:  {avg(tool_pcts):.1f}%  (std: {std(tool_pcts):.1f}%)")
-        if any(overhead_pcts):
-            print(f"  Avg % time overhead:       {avg(overhead_pcts):.1f}%  (std: {std(overhead_pcts):.1f}%)")
+        ac = timing["agent_call"]["avg"]
+        if ac > 0:
+            ttfo_pct = s["ttfo_pct"]
+            llm_pct = s["llm_pct"]
+            tool_pct = s["tool_pct"]
+            oh_pct = s["overhead_pct"]
+            if ttfo_pct["avg"] > 0:
+                print(f"  Avg % time before 1st Obs: {ttfo_pct['avg']:.1f}%  (std: {ttfo_pct['std']:.1f}%)")
+            if llm_pct["avg"] > 0:
+                print(f"  Avg % time on LLM calls:   {llm_pct['avg']:.1f}%  (std: {llm_pct['std']:.1f}%)")
+            if tool_pct["avg"] > 0:
+                print(f"  Avg % time on Tool calls:  {tool_pct['avg']:.1f}%  (std: {tool_pct['std']:.1f}%)")
+            if oh_pct["avg"] > 0:
+                print(f"  Avg % time overhead:       {oh_pct['avg']:.1f}%  (std: {oh_pct['std']:.1f}%)")
 
-        input_tokens = [float(t.llm_input_tokens) for t in traces]
-        output_tokens = [float(t.llm_output_tokens) for t in traces]
-        total_tokens = [i + o for i, o in zip(input_tokens, output_tokens)]
-        if any(input_tokens):
-            print(f"  Avg LLM input tokens:      {avg(input_tokens):.0f}  (std: {std(input_tokens):.0f})")
-        if any(output_tokens):
-            print(f"  Avg LLM output tokens:     {avg(output_tokens):.0f}  (std: {std(output_tokens):.0f})")
-        if any(input_tokens) or any(output_tokens):
-            print(f"  Avg LLM total tokens:      {avg(total_tokens):.0f}  (std: {std(total_tokens):.0f})")
+        inp = s["input_tokens"]
+        out = s["output_tokens"]
+        tot = s["total_tokens"]
+        if inp["avg"] > 0:
+            print(f"  Avg LLM input tokens:      {inp['avg']:.0f}  (std: {inp['std']:.0f})")
+        if out["avg"] > 0:
+            print(f"  Avg LLM output tokens:     {out['avg']:.0f}  (std: {out['std']:.0f})")
+        if inp["avg"] > 0 or out["avg"] > 0:
+            print(f"  Avg LLM total tokens:      {tot['avg']:.0f}  (std: {tot['std']:.0f})")
 
-        # Infrastructure metrics (only from traces that have infra data)
-        infra_traces = [t for t in traces if t.has_infra]
+        if "infra" in s:
+            infra = s["infra"]
+            for pod_key, pod_label in (("mcp", "MCP"), ("a2a", "A2A")):
+                pod = infra.get(pod_key, {})
+                if not pod:
+                    continue
+                n_infra = infra["n"]
+                print()
+                print(f"  Infrastructure ({pod_label} pod, n={n_infra})   {'Avg':>9s} {'P50':>9s} {'Max':>9s}")
+                print(f"  {'-' * 34} {'-' * 9} {'-' * 9} {'-' * 9}")
 
-        def infra_section(pod_label: str, pod_key: str) -> None:
-            if not infra_traces:
-                return
+                def infra_row(label: str, metric: str, fmt: str) -> None:
+                    m = pod[metric]
+                    print(f"  {label:<34s} {m['avg']:>9{fmt}} {m['p50']:>9{fmt}} {m['max']:>9{fmt}}")
 
-            cpu_util = [getattr(t, f"{pod_key}_cpu_utilization_pct") for t in infra_traces]
-            throttle = [getattr(t, f"{pod_key}_throttle_pct") for t in infra_traces]
-            mem = [getattr(t, f"{pod_key}_memory_max_mb") for t in infra_traces]
-            mem_util = [getattr(t, f"{pod_key}_memory_utilization_pct") for t in infra_traces]
-            rx = [getattr(t, f"{pod_key}_network_rx_mb") for t in infra_traces]
-            tx = [getattr(t, f"{pod_key}_network_tx_mb") for t in infra_traces]
+                infra_row("CPU Utilization (%)", "cpu_utilization_pct", ".1f")
+                infra_row("CPU Throttle (%)", "throttle_pct", ".1f")
+                infra_row("Memory Max (MB)", "memory_max_mb", ".0f")
+                infra_row("Memory Utilization (%)", "memory_utilization_pct", ".1f")
+                infra_row("Network RX (MB)", "network_rx_mb", ".3f")
+                infra_row("Network TX (MB)", "network_tx_mb", ".3f")
 
-            if not infra_traces:
-                return
-
-            print()
-            print(f"  Infrastructure ({pod_label} pod, n={len(infra_traces)})   {'Avg':>9s} {'P50':>9s} {'Max':>9s}")
-            print(f"  {'-' * 34} {'-' * 9} {'-' * 9} {'-' * 9}")
-
-            def infra_row(label: str, values: list[float], fmt: str = ".2f") -> None:
-                print(f"  {label:<34s} {avg(values):>9{fmt}} {percentile(values, 0.5):>9{fmt}} {max(values):>9{fmt}}")
-
-            infra_row("CPU Utilization (%)", cpu_util, ".1f")
-            infra_row("CPU Throttle (%)", throttle, ".1f")
-            infra_row("Memory Max (MB)", mem, ".0f")
-            infra_row("Memory Utilization (%)", mem_util, ".1f")
-            infra_row("Network RX (MB)", rx, ".3f")
-            infra_row("Network TX (MB)", tx, ".3f")
-
-        infra_section("MCP", "mcp")
-        infra_section("A2A", "a2a")
         print()
 
     # Individual traces
@@ -449,143 +542,101 @@ def print_report(records: list[TraceRecord]) -> None:
 
     print()
     print("All times in seconds. LLM and LLM% are after initial observation only.")
-    
-    # Comparative analysis: metrics by parallel sessions for each agent/benchmark/model
+
+    # Comparative analysis: metrics by parallel sessions — driven from summaries
     print()
     print("=" * 140)
     print("Comparative Analysis: Metrics by Parallel Sessions")
     print("=" * 140)
     print()
-    
-    # Group by (agent, benchmark, model) and then by parallel sessions
-    config_groups: dict[tuple, dict[int, list[TraceRecord]]] = defaultdict(lambda: defaultdict(list))
-    
-    for r in records:
-        config_key = (r.experiment_name, r.agent_name, r.benchmark_name, r.model)
-        config_groups[config_key][r.num_parallel].append(r)
-    
-    # Print a table for each configuration
+
+    # Group summaries by (experiment, agent, benchmark, model) then by num_parallel
+    config_groups: dict[tuple, dict[int, dict]] = defaultdict(dict)
+    for s in summaries:
+        config_key = (s["experiment_name"], s["agent_name"], s["benchmark_name"], s["model"])
+        config_groups[config_key][s["num_parallel"]] = s
+
     for config_key in sorted(config_groups.keys()):
         experiment, agent, benchmark, model = config_key
-        parallel_groups = config_groups[config_key]
-        
-        # Get all parallel values for this config
-        parallel_values = sorted(parallel_groups.keys())
-        
+        parallel_map = config_groups[config_key]
+        parallel_values = sorted(parallel_map.keys())
+
         if len(parallel_values) < 2:
-            # Skip if only one parallel value (no comparison to make)
             continue
-        
+
         print(f"\nAgent: {agent}  |  Benchmark: {benchmark}  |  Model: {model}")
         print("-" * 140)
-        
-        # Check if any traces have infra data
-        has_infra = any(t.has_infra for traces in parallel_groups.values() for t in traces)
-        
-        # Build header
-        header = f"{'Metric':<35s}"
+
+        has_infra = any("infra" in parallel_map[p] for p in parallel_values)
+
+        col_header = f"{'Metric':<35s}"
         for p in parallel_values:
-            header += f" | {f'Parallel={p}':>12s}"
-        print(header)
-        print("-" * len(header))
-        
-        # Helper to print a metric row
-        def print_metric_row(label: str, metric_fn, fmt: str = ".2f") -> None:
-            row = f"{label:<35s}"
+            col_header += f" | {f'Parallel={p}':>12s}"
+        print(col_header)
+        print("-" * len(col_header))
+
+        def smrow(label: str, getter, fmt: str = ".2f") -> None:
+            line = f"{label:<35s}"
             for p in parallel_values:
-                traces = parallel_groups[p]
-                values = [metric_fn(t) for t in traces]
-                avg_val = avg(values)
-                row += f" | {avg_val:>12{fmt}}"
-            print(row)
-        
-        # Count row (not averaged — shows number of traces per group)
+                line += f" | {getter(parallel_map[p]):>12{fmt}}"
+            print(line)
+
         count_row = f"{'Traces (count)':<35s}"
         for p in parallel_values:
-            count_row += f" | {len(parallel_groups[p]):>12d}"
+            count_row += f" | {parallel_map[p]['counts']['traces']:>12d}"
         print(count_row)
 
-        # --- Timing (absolute) ---
-        print_metric_row("Total Latency (s)", lambda t: t.total_latency_s)
-        print_metric_row("Session Creation (s)", lambda t: t.session_creation_s)
-        print_metric_row("Agent Call (s)", lambda t: t.agent_call_s)
-        print_metric_row("  Time to First Obs (s)", lambda t: t.time_to_first_obs_s)
-        print_metric_row("  LLM Calls (s)", lambda t: t.llm_after_obs_s)
-        print_metric_row("  Tool Calls (s)", lambda t: t.tool_total_s)
-        print_metric_row("  Overhead (s)", lambda t: t.overhead_s)
-        print_metric_row("Evaluation (s)", lambda t: t.evaluation_s)
+        smrow("Total Latency (s)", lambda s: s["timing"]["total"]["avg"])
+        smrow("Session Creation (s)", lambda s: s["timing"]["session_creation"]["avg"])
+        smrow("Agent Call (s)", lambda s: s["timing"]["agent_call"]["avg"])
+        smrow("  Time to First Obs (s)", lambda s: s["timing"]["time_to_first_obs"]["avg"])
+        smrow("  LLM Calls (s)", lambda s: s["timing"]["llm_after_obs"]["avg"])
+        smrow("  Tool Calls (s)", lambda s: s["timing"]["tool_total"]["avg"])
+        smrow("  Overhead (s)", lambda s: s["timing"]["overhead"]["avg"])
+        smrow("Evaluation (s)", lambda s: s["timing"]["evaluation"]["avg"])
 
-        # --- Timing (% of agent call) ---
-        sep = f"{'':35s}"
-        for _ in parallel_values:
-            sep += f" | {'':>12s}"
+        sep = f"{'':35s}" + f" | {'':>12s}" * len(parallel_values)
         print(sep)
-        print_metric_row("% Time before 1st Obs",
-                         lambda t: (t.time_to_first_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time on LLM calls",
-                         lambda t: (t.llm_after_obs_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time on Tool calls",
-                         lambda t: (t.tool_total_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
-        print_metric_row("% Time overhead",
-                         lambda t: (t.overhead_s / t.agent_call_s * 100) if t.agent_call_s > 0 else 0, ".1f")
+        smrow("% Time before 1st Obs", lambda s: s["ttfo_pct"]["avg"], ".1f")
+        smrow("% Time on LLM calls", lambda s: s["llm_pct"]["avg"], ".1f")
+        smrow("% Time on Tool calls", lambda s: s["tool_pct"]["avg"], ".1f")
+        smrow("% Time overhead", lambda s: s["overhead_pct"]["avg"], ".1f")
 
-        # --- Agent metrics ---
         print(sep)
-        print_metric_row("LLM Calls (count)", lambda t: t.llm_count_after_obs, ".1f")
-        print_metric_row("Avg LLM Call Latency (s)", lambda t: (t.llm_after_obs_s / max(t.llm_count_after_obs, 1)) if t.llm_count_after_obs > 0 else 0, ".3f")
-        print_metric_row("Tool Calls (count)", lambda t: t.tool_count, ".1f")
-        print_metric_row("Avg Tool Call Latency (s)", lambda t: (t.tool_total_s / max(t.tool_count, 1)) if t.tool_count > 0 else 0, ".3f")
-        print_metric_row("LLM Input Tokens", lambda t: t.llm_input_tokens, ".0f")
-        print_metric_row("LLM Output Tokens", lambda t: t.llm_output_tokens, ".0f")
-        print_metric_row("LLM Total Tokens", lambda t: t.llm_input_tokens + t.llm_output_tokens, ".0f")
+        smrow("LLM Calls (count)", lambda s: s["llm_calls_after_obs"]["avg"], ".1f")
+        smrow("Avg LLM Call Latency (s)", lambda s: s["llm_call_latency_s"]["avg"], ".3f")
+        smrow("Tool Calls (count)", lambda s: s["tool_calls"]["avg"], ".1f")
+        smrow("Avg Tool Call Latency (s)", lambda s: s["tool_call_latency_s"]["avg"], ".3f")
+        smrow("LLM Input Tokens", lambda s: s["input_tokens"]["avg"], ".0f")
+        smrow("LLM Output Tokens", lambda s: s["output_tokens"]["avg"], ".0f")
+        smrow("LLM Total Tokens", lambda s: s["total_tokens"]["avg"], ".0f")
 
-        # --- Success metrics ---
         print(sep)
+        smrow("Evaluation Success Rate (%)",
+              lambda s: (s["counts"]["eval_success"] / s["counts"]["traces"] * 100)
+              if s["counts"]["traces"] > 0 else 0.0, ".1f")
+        smrow("Error Rate (%)",
+              lambda s: (s["counts"]["errors"] / s["counts"]["traces"] * 100)
+              if s["counts"]["traces"] > 0 else 0.0, ".1f")
 
-        def eval_success_rate(traces: list[TraceRecord]) -> float:
-            n = len(traces)
-            success = sum(1 for t in traces if t.evaluation_result is True)
-            return (success / n * 100) if n > 0 else 0.0
-
-        eval_row = f"{'Evaluation Success Rate (%)':<35s}"
-        for p in parallel_values:
-            traces = parallel_groups[p]
-            eval_row += f" | {eval_success_rate(traces):>12.1f}"
-        print(eval_row)
-
-        def error_rate(traces: list[TraceRecord]) -> float:
-            n = len(traces)
-            errors = sum(1 for t in traces if t.status == "ERROR")
-            return (errors / n * 100) if n > 0 else 0.0
-
-        err_row = f"{'Error Rate (%)':<35s}"
-        for p in parallel_values:
-            traces = parallel_groups[p]
-            err_row += f" | {error_rate(traces):>12.1f}"
-        print(err_row)
-        
-        # Infrastructure metrics (if available)
         if has_infra:
             print()
             print("Infrastructure Metrics (from traces with infra data):")
-            print("-" * len(header))
-            
-            # MCP metrics
-            print_metric_row("MCP CPU Utilization (%)", lambda t: t.mcp_cpu_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP CPU Throttle (%)", lambda t: t.mcp_throttle_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP Memory Max (MB)", lambda t: t.mcp_memory_max_mb if t.has_infra else 0, ".0f")
-            print_metric_row("MCP Memory Utilization (%)", lambda t: t.mcp_memory_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("MCP Network RX (MB)", lambda t: t.mcp_network_rx_mb if t.has_infra else 0, ".3f")
-            print_metric_row("MCP Network TX (MB)", lambda t: t.mcp_network_tx_mb if t.has_infra else 0, ".3f")
-            
-            # A2A metrics
-            print_metric_row("A2A CPU Utilization (%)", lambda t: t.a2a_cpu_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A CPU Throttle (%)", lambda t: t.a2a_throttle_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A Memory Max (MB)", lambda t: t.a2a_memory_max_mb if t.has_infra else 0, ".0f")
-            print_metric_row("A2A Memory Utilization (%)", lambda t: t.a2a_memory_utilization_pct if t.has_infra else 0, ".1f")
-            print_metric_row("A2A Network RX (MB)", lambda t: t.a2a_network_rx_mb if t.has_infra else 0, ".3f")
-            print_metric_row("A2A Network TX (MB)", lambda t: t.a2a_network_tx_mb if t.has_infra else 0, ".3f")
-        
+            print("-" * len(col_header))
+            for pod_key, pod_label in (("mcp", "MCP"), ("a2a", "A2A")):
+                smrow(f"{pod_label} CPU Utilization (%)",
+                      lambda s, pk=pod_key: s["infra"][pk]["cpu_utilization_pct"]["avg"] if "infra" in s else 0, ".1f")
+                smrow(f"{pod_label} CPU Throttle (%)",
+                      lambda s, pk=pod_key: s["infra"][pk]["throttle_pct"]["avg"] if "infra" in s else 0, ".1f")
+                smrow(f"{pod_label} Memory Max (MB)",
+                      lambda s, pk=pod_key: s["infra"][pk]["memory_max_mb"]["avg"] if "infra" in s else 0, ".0f")
+                smrow(f"{pod_label} Memory Utilization (%)",
+                      lambda s, pk=pod_key: s["infra"][pk]["memory_utilization_pct"]["avg"] if "infra" in s else 0, ".1f")
+                smrow(f"{pod_label} Network RX (MB)",
+                      lambda s, pk=pod_key: s["infra"][pk]["network_rx_mb"]["avg"] if "infra" in s else 0, ".3f")
+                smrow(f"{pod_label} Network TX (MB)",
+                      lambda s, pk=pod_key: s["infra"][pk]["network_tx_mb"]["avg"] if "infra" in s else 0, ".3f")
+
         print()
 
 
@@ -751,8 +802,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze Phoenix agent traces")
     parser.add_argument("file", nargs="?", help="JSON file to read (default: stdin)")
     parser.add_argument("--compare", action="store_true", help="Enable comparison mode (currently unused, for future enhancements)")
+    parser.add_argument("--json", dest="json_path", metavar="PATH",
+                        help="Also write the computed analysis (per-trace records + group summaries) as JSON to PATH")
     args = parser.parse_args()
-    
+
     if args.file and args.file != "-":
         with open(args.file) as f:
             raw = json.load(f)
@@ -760,6 +813,10 @@ def main() -> int:
         raw = json.load(sys.stdin)
 
     records = parse_traces(raw)
+
+    if args.json_path:
+        with open(args.json_path, "w") as f:
+            json.dump(build_analysis_json(records), f, indent=2)
 
     if args.compare:
         print_experiment_comparison(records)

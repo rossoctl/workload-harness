@@ -18,6 +18,7 @@
 #   --kind                         Target a local Kind cluster (default)
 #   --openshift DOMAIN             Target an OpenShift cluster with the given ingress domain
 #   --in-cluster                   Running as a Kubernetes Job inside the cluster
+#   --save-analysis FILE           Save the computed analysis as JSON to FILE
 #   --dry                          Dry run mode - print commands without executing them
 #   -h, --help                     Show this help and exit
 #
@@ -41,6 +42,7 @@ AGENT="tool_calling"
 MAX_TASKS=10
 MAX_PARALLEL_SESSIONS=1
 PLUGIN_PRESET="ibac-only"
+SAVE_ANALYSIS_FILE=""
 DRY_RUN="false"
 
 # Cluster-mode flag forwarded verbatim to deploy-and-evaluate.sh (which validates
@@ -85,6 +87,10 @@ while [[ $# -gt 0 ]]; do
             CLUSTER_FLAG=(--in-cluster)
             shift
             ;;
+        --save-analysis)
+            SAVE_ANALYSIS_FILE="$2"
+            shift 2
+            ;;
         --dry)
             DRY_RUN="true"
             shift
@@ -105,11 +111,11 @@ done
 # passing anything else (e.g. "auth_only" with an underscore) produces a broken
 # auth pipeline rather than a clear error, so reject it up front.
 case "$PLUGIN_PRESET" in
-    auth-only|ibac-only|full)
+    auth-only|ibac-only|sparc-only|full)
         ;;
     *)
         echo "Error: invalid --plugin-preset: '$PLUGIN_PRESET'" >&2
-        echo "Valid values: auth-only | ibac-only | full" >&2
+        echo "Valid values: auth-only | ibac-only | sparc-only| full" >&2
         exit 1
         ;;
 esac
@@ -149,6 +155,9 @@ if [ ${#CLUSTER_FLAG[@]} -gt 0 ]; then
     echo "Cluster mode:           ${CLUSTER_FLAG[*]}"
 else
     echo "Cluster mode:           <default>"
+fi
+if [ -n "$SAVE_ANALYSIS_FILE" ]; then
+    echo "Save analysis to:       $SAVE_ANALYSIS_FILE"
 fi
 echo "Dry run:                $DRY_RUN"
 echo "=========================================="
@@ -203,7 +212,11 @@ run_step env IBAC_JUDGE_ENDPOINT="$OPENAI_API_BASE" \
         ${DRY_FLAG[@]+"${DRY_FLAG[@]}"}
 
 # Compare the two runs.
-run_step "$SCRIPT_DIR/analyze-run.sh" -c "${EXPERIMENT_PLUGIN},${EXPERIMENT_BASE}" ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"}
+ANALYZE_FLAGS=(-c "${EXPERIMENT_PLUGIN},${EXPERIMENT_BASE}")
+if [ -n "$SAVE_ANALYSIS_FILE" ]; then
+    ANALYZE_FLAGS+=(--save-analysis "$SAVE_ANALYSIS_FILE")
+fi
+run_step "$SCRIPT_DIR/analyze-run.sh" "${ANALYZE_FLAGS[@]}" ${CLUSTER_FLAG[@]+"${CLUSTER_FLAG[@]}"}
 
 if [ "$DRY_RUN" = "true" ]; then
     echo "=========================================="

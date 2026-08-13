@@ -58,6 +58,10 @@ CLUSTER_MODE=""
 INGRESS_DOMAIN=""
 # Directory to save the raw downloaded traces JSON into. Empty = don't save.
 SAVE_TRACES_DIR="${SAVE_TRACES_DIR:-}"
+# File to save the computed analysis (per-trace records + group summaries) as
+# JSON into. Empty = don't save. Distinct from SAVE_TRACES_DIR, which saves the
+# raw download; this saves the analyzer's output.
+SAVE_ANALYSIS_FILE="${SAVE_ANALYSIS_FILE:-}"
 
 usage() {
     cat << EOF
@@ -78,6 +82,7 @@ Options:
     --mlflow-workspace NAME    Send x-mlflow-workspace header
     --auth-mode MODE           Token source: secret (rossoctl oauth secret) or oc-token (oc whoami -t)
     --save-traces DIR          Save the raw downloaded traces JSON into DIR (created if needed)
+    --save-analysis FILE       Save the computed analysis (per-trace records + group summaries) as JSON to FILE
     -h, --help                 Show this help message
 
 The MLflow location, TLS, workspace, auth mode, and experiment id all DEFAULT
@@ -106,6 +111,7 @@ Examples:
     $0 --openshift apps.mycluster.example.com --experiment-id 3 --compare baseline,test1
     $0 -u http://mlflow.localtest.me:8080 --window 2d
     $0 --window 6h --save-traces ./traces
+    $0 --window 6h --save-analysis ./analysis.json
 EOF
     exit 1
 }
@@ -128,6 +134,7 @@ while [[ $# -gt 0 ]]; do
         --mlflow-workspace) MLFLOW_WORKSPACE="$2"; shift 2 ;;
         --auth-mode)        AUTH_MODE="$2"; shift 2 ;;
         --save-traces)      SAVE_TRACES_DIR="$2"; shift 2 ;;
+        --save-analysis)    SAVE_ANALYSIS_FILE="$2"; shift 2 ;;
         --kind)             CLUSTER_MODE="kind"; shift ;;
         --openshift)
             CLUSTER_MODE="openshift"
@@ -259,6 +266,9 @@ if [ -n "$COMPARE_EXPERIMENTS" ]; then
 fi
 if [ -n "$SAVE_TRACES_DIR" ]; then
     echo "Saving traces to: $SAVE_TRACES_DIR"
+fi
+if [ -n "$SAVE_ANALYSIS_FILE" ]; then
+    echo "Saving analysis to: $SAVE_ANALYSIS_FILE"
 fi
 echo ""
 
@@ -480,9 +490,12 @@ fi
 export MLFLOW_URL OAUTH_TOKEN EXPERIMENT_ID WINDOW_MS EXPERIMENT_FILTER COMPARE_EXPERIMENTS
 export MLFLOW_WORKSPACE MLFLOW_INSECURE_TLS
 
-PYTHON_ARGS=""
+PYTHON_ARGS=()
 if [ -n "$COMPARE_EXPERIMENTS" ]; then
-    PYTHON_ARGS="--compare"
+    PYTHON_ARGS+=("--compare")
+fi
+if [ -n "$SAVE_ANALYSIS_FILE" ]; then
+    PYTHON_ARGS+=("--json" "$SAVE_ANALYSIS_FILE")
 fi
 
 # download_mlflow_traces.py exits 75 when MLflow rejects the token (a valid
@@ -498,10 +511,10 @@ if [ -n "$SAVE_TRACES_DIR" ]; then
     SAVE_TRACES_FILE="$SAVE_TRACES_DIR/traces-$(date +%Y%m%d-%H%M%S).json"
     python3 "$SCRIPT_DIR/download_mlflow_traces.py" \
         | tee "$SAVE_TRACES_FILE" \
-        | python3 "$SCRIPT_DIR/analyze_traces.py" $PYTHON_ARGS
+        | python3 "$SCRIPT_DIR/analyze_traces.py" "${PYTHON_ARGS[@]}"
     DOWNLOAD_STATUS=${PIPESTATUS[0]}
 else
-    python3 "$SCRIPT_DIR/download_mlflow_traces.py" | python3 "$SCRIPT_DIR/analyze_traces.py" $PYTHON_ARGS
+    python3 "$SCRIPT_DIR/download_mlflow_traces.py" | python3 "$SCRIPT_DIR/analyze_traces.py" "${PYTHON_ARGS[@]}"
     DOWNLOAD_STATUS=${PIPESTATUS[0]}
 fi
 set -e
@@ -509,6 +522,10 @@ set -e
 if [ -n "$SAVE_TRACES_DIR" ] && [ "$DOWNLOAD_STATUS" -eq 0 ]; then
     echo ""
     echo "✓ Saved traces to $SAVE_TRACES_FILE"
+fi
+if [ -n "$SAVE_ANALYSIS_FILE" ] && [ "$DOWNLOAD_STATUS" -eq 0 ]; then
+    echo ""
+    echo "✓ Saved analysis to $SAVE_ANALYSIS_FILE"
 fi
 
 if [ "$DOWNLOAD_STATUS" -eq 75 ]; then

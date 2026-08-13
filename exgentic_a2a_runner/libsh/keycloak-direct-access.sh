@@ -88,15 +88,17 @@ enable_direct_access_grants() {
         exit 1
     fi
 
-    local put_code
-    put_code=$(curl -s -o /tmp/kc_put_response.txt -w "%{http_code}" \
+    local put_code put_response_file
+    put_response_file=$(mktemp -t kc_put_response.XXXXXX)
+    trap 'rm -f "$put_response_file"' RETURN
+    put_code=$(curl -s -o "$put_response_file" -w "%{http_code}" \
         -X PUT "$KEYCLOAK_API/admin/realms/rossoctl/clients/$client_id" \
         -H "Authorization: Bearer $admin_token" \
         -H "Content-Type: application/json" \
         -d "$put_body" 2>/dev/null) || put_code="000"
     if [ "$put_code" != "204" ] && [ "$put_code" != "200" ]; then
         echo "Error: Failed to enable direct access grants for ${target_client} client (HTTP $put_code)" >&2
-        echo "  Response: $(cat /tmp/kc_put_response.txt 2>/dev/null)" >&2
+        echo "  Response: $(cat "$put_response_file" 2>/dev/null)" >&2
         exit 1
     fi
     echo "✓ Direct access grants enabled for ${target_client} client"

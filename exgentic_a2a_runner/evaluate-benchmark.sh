@@ -347,6 +347,23 @@ if [ "$CLUSTER_MODE" != "in-cluster" ]; then
         echo "  OTEL Collector PID: $PF_OTEL_COLLECTOR_PID"
         echo ""
     fi
+
+    echo "Waiting for Prometheus port-forward to be ready..."
+    sleep 3
+
+    if ! ps -p $PF_PROMETHEUS_PID > /dev/null; then
+        echo "Error: Prometheus port-forward failed to start"
+        if [ -n "$PF_PROMETHEUS_LOG" ] && [ -s "$PF_PROMETHEUS_LOG" ]; then
+            echo "  kubectl output:"
+            sed 's/^/    /' "$PF_PROMETHEUS_LOG"
+        fi
+        exit 1
+    fi
+
+    echo ""
+    echo "✓ Prometheus port-forward established"
+    echo "  Prometheus PID: $PF_PROMETHEUS_PID"
+    echo ""
 else
     echo "Running in-cluster — using cluster DNS for Prometheus and OTEL, no port-forwards needed."
 fi
