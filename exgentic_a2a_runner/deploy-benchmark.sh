@@ -339,7 +339,20 @@ echo ""
 # Step 7.1.1 + 7.1.2: Update secrets
 echo "Step 7.1.1: Updating secrets..."
 if [ "$CLUSTER_MODE" = "kind" ]; then
-    "$SCRIPT_DIR_BENCH/update-secrets.sh" --namespace "$NAMESPACE"
+    # Don't let set -e abort before the reason can be printed.
+    SECRETS_OUTPUT=$("$SCRIPT_DIR_BENCH/update-secrets.sh" --namespace "$NAMESPACE" 2>&1) && SECRETS_RC=0 || SECRETS_RC=$?
+    echo "$SECRETS_OUTPUT"
+    if [ "$SECRETS_RC" -ne 0 ]; then
+        echo "ERROR: update-secrets.sh failed (exit $SECRETS_RC) — see the output above for the reason" >&2
+        exit "$SECRETS_RC"
+    fi
+    # update-secrets.sh exits 0 even when an individual patch fails, so check
+    # its output for the warning and surface the reason it printed.
+    if echo "$SECRETS_OUTPUT" | grep -qE "Could not (update|create) openai-secret"; then
+        echo "ERROR: could not set secret openai-secret in namespace $NAMESPACE" >&2
+        echo "$SECRETS_OUTPUT" | grep -E -A 1 "Could not (update|create) openai-secret" >&2
+        exit 1
+    fi
 else
     echo "Step 7.1.1: Updating secrets... (skipped — secrets are pre-provisioned on OpenShift/in-cluster)"
 fi

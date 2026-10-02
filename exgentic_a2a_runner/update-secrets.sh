@@ -36,13 +36,32 @@ if [ -z "$OPENAI_API_KEY" ]; then
     echo "Warning: OPENAI_API_KEY is not set — skipping"
 else
     ENCODED_KEY=$(echo -n "$OPENAI_API_KEY" | base64)
-    kubectl patch secret openai-secret -n "$NAMESPACE" --type='json' -p="[
-      {
-        \"op\": \"replace\",
-        \"path\": \"/data/apikey\",
-        \"value\": \"$ENCODED_KEY\"
-      }
-    ]" 2>/dev/null && echo "✓ openai-secret updated" || echo "Warning: Could not update openai-secret"
+    # Patch when the secret already exists, create it otherwise. Stderr is
+    # captured (2>&1 >/dev/null) so a real failure reports why kubectl refused
+    # — RBAC denial, missing namespace, missing /data/apikey key, ...
+    if kubectl get secret openai-secret -n "$NAMESPACE" >/dev/null 2>&1; then
+        if PATCH_ERR=$(kubectl patch secret openai-secret -n "$NAMESPACE" --type='json' -p="[
+          {
+            \"op\": \"replace\",
+            \"path\": \"/data/apikey\",
+            \"value\": \"$ENCODED_KEY\"
+          }
+        ]" 2>&1 >/dev/null); then
+            echo "✓ openai-secret updated"
+        else
+            echo "Warning: Could not update openai-secret (kubectl patch secret openai-secret -n $NAMESPACE failed)"
+            [ -n "$PATCH_ERR" ] && echo "  Reason: $PATCH_ERR"
+        fi
+    else
+        # Key must be "apikey" — that is what k8s/job.yaml's secretKeyRef reads.
+        if CREATE_ERR=$(kubectl create secret generic openai-secret -n "$NAMESPACE" \
+            --from-literal=apikey="$OPENAI_API_KEY" 2>&1 >/dev/null); then
+            echo "✓ openai-secret created"
+        else
+            echo "Warning: Could not create openai-secret (kubectl create secret generic openai-secret -n $NAMESPACE failed)"
+            [ -n "$CREATE_ERR" ] && echo "  Reason: $CREATE_ERR"
+        fi
+    fi
 fi
 
 echo ""
