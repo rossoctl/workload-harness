@@ -1,3 +1,11 @@
+> [!CAUTION]
+> **This repository is DEPRECATED and will be archived on 2026-11-02.**
+>
+> It is no longer maintained and will become read-only on that date.
+> No new issues or pull requests will be accepted after the archive.
+>
+> If you depend on anything here, migrate before 2026-11-02.
+
 # Kagenti Workload Harness
 
 Workload harnesses for driving test and evaluation traffic to Kagenti agents. The current implementation is the **Exgentic A2A Runner** (`exgentic_a2a_runner/`) — a standalone Python runner that integrates Exgentic benchmarks with Kagenti agents using the A2A (Agent-to-Agent) protocol. This harness implements the execution model defined in [GitHub Issue #963](https://github.com/rossoctl/rossoctl/issues/963).
